@@ -4,7 +4,13 @@
   *		- set p_IDELAY_TYPE to "VAR_LOAD"
   *	TODO: Complete description
   */
-module ddr3_rdcal(
+module ddr3_rdcal #(
+	parameter	p_RDCAL_BANK	= 3'b0,
+	parameter	p_RDCAL_ROW		= 14'b0,
+	parameter	p_RDCAL_COL		= 10'b0,
+	
+	parameter	p_RDCAL_WORD	= 128'h0000_ffff_0000_ffff_0000_ffff_0000_ffff
+)(
 	input	i_clk_div,
 	input	i_rdcal_start,
 	
@@ -30,30 +36,31 @@ module ddr3_rdcal(
 	input	[13:0]	i14_rdc_row,
 	input	[9:0]	i10_rdc_col,
 	input	[127:0]	i128_rdc_wrdata,
+	input	[7:0]	i8_rdc_wrdm,
 	
 	output	o_phy_cmd_en,
 	output	o_phy_cmd_sel,
 	output	[2:0]	o3_phy_bank,
 	output	[13:0]	o14_phy_row,
 	output	[9:0]	o10_phy_col,
-	output	[127:0]	o128_phy_wrdata
+	output	[127:0]	o128_phy_wrdata,
+	output	[7:0]	o8_phy_wrdm
 );
 
 reg	r_phy_cmd_en;
 reg	r_phy_cmd_sel;
 
-reg	[2:0]	r3_bank;
-reg	[13:0]	r14_row;
-reg	[9:0]	r10_col;
-
-reg	[127:0]	r128_wrdata;
-
 reg	[2:0]	r3_calib_state	= 4'b0;
 
-reg	[127:0]	r128_caldata = 'h0000_ffff_0000_ffff_0000_ffff_0000_ffff;
+wire	[2:0]	w3_cal_bank	= p_RDCAL_BANK;
+wire	[13:0]	w14_cal_row	= p_RDCAL_ROW;
+wire	[9:0]	w10_cal_col	= p_RDCAL_COL;
+
+wire	[127:0]	w128_cal_wrdata	= p_RDCAL_WORD;
+wire	[7:0]	w8_cal_wrdm	= 8'b0;
+
 reg	[4:0]	r5_dqs_delay_cnt, r5_dq_delay_cnt;
 reg	r_dqs_delay_ld, r_dq_delay_ld;
-
 
 reg	[4:0]	r5_calib_width_best,	// largest number of successful read attempts per DQ tap (as a function of DQS taps)
 		r5_calib_width,	// number of successful read attempts per DQ tap (as a function of DQS taps) for the currently tested DQ tap value
@@ -62,7 +69,6 @@ reg	[4:0]	r5_calib_width_best,	// largest number of successful read attempts per
 		r5_calib_dqs_min_best;
 reg	r_rd_cal_done;
 reg	r_rd_cal_err;
-
 
 always @(posedge i_clk_div) begin: rd_calibration
 	r_dqs_delay_ld <= 1'b0;
@@ -73,11 +79,7 @@ always @(posedge i_clk_div) begin: rd_calibration
 	case (r3_calib_state)
 	'd0: begin	// init IDELAY, write calibration word to DRAM
 		if (i_rdcal_start && !i_phy_cmd_full && i_phy_init_done) begin
-			r3_bank <= 3'b000;
-			r14_row <= 14'd0;
-			r10_col <= 10'd0;
-			r128_wrdata <= r128_caldata;
-	
+
 			r_phy_cmd_en <= 1'b1;	//	 write calibration word to SDRAM
 			r_phy_cmd_sel <= 1'b0;
 			
@@ -104,9 +106,6 @@ always @(posedge i_clk_div) begin: rd_calibration
 		r3_calib_state <= 'd2;
 	end
 	'd2: begin	// read calibration word from SDRAM
-		r3_bank <= 3'b000;
-		r14_row <= 14'd0;
-		r10_col <= 10'd0;
 		if (!i_phy_cmd_full) begin
 			r_phy_cmd_en <= 1'b1;
 			r_phy_cmd_sel <= 1'b1;
@@ -116,7 +115,7 @@ always @(posedge i_clk_div) begin: rd_calibration
 	end
 	'd3: begin	// log whether current IDELAY tap counts are okay
 		if (i_phy_rddata_valid) begin
-			if (in_phy_rddata == r128_caldata) begin
+			if (in_phy_rddata == p_RDCAL_WORD) begin
 				r5_calib_width <= r5_calib_width + 1'b1; // if ok, increase current calib_width
 				if (r5_calib_width == 5'd0)
 					r5_calib_dqs_min <= r5_dqs_delay_cnt;	// remember first valid DQS tap count
@@ -180,9 +179,10 @@ assign o_dq_delay_ld = r_dq_delay_ld;
 assign o5_dqs_idelay_cnt = r5_dqs_delay_cnt;
 assign o5_dq_idelay_cnt = r5_dq_delay_cnt;
 
-assign {o3_phy_bank, o14_phy_row, o10_phy_col, o128_phy_wrdata, o_phy_cmd_en, o_phy_cmd_sel} = (r_rd_cal_done)
-	? {i3_rdc_bank, i14_rdc_row, i10_rdc_col, i128_rdc_wrdata, i_rdc_cmd_en, i_rdc_cmd_sel}
-	: {r3_bank, r14_row, r10_col, r128_wrdata, r_phy_cmd_en, r_phy_cmd_sel};
+assign {o_phy_cmd_en, o_phy_cmd_sel, o3_phy_bank, o14_phy_row, o10_phy_col, o128_phy_wrdata, o8_phy_wrdm} = (r_rd_cal_done)
+	? {i_rdc_cmd_en, i_rdc_cmd_sel, i3_rdc_bank, i14_rdc_row, i10_rdc_col, i128_rdc_wrdata, i8_rdc_wrdm}
+	: {r_phy_cmd_en, r_phy_cmd_sel, w3_cal_bank, w14_cal_row, w10_cal_col, w128_cal_wrdata, w8_cal_wrdm};
+
 assign o_rdcal_done = r_rd_cal_done;
 assign o_rdcal_err = r_rd_cal_err; 
 
