@@ -11,7 +11,7 @@ Originally written for the Digilent Arty S7-50 development board and its supplie
 #### Quirks
 * Only one open bank at a time
 * No command piping or intelligent look-ahead
-* Write-to-read or read-to-write commands within the same row slow sequential access
+* Write-to-read or read-to-write time is long even within same row
 * Write leveling is not implemented
 * Incomplete timing constraints 
 
@@ -22,21 +22,63 @@ Externally, the core requires the user to instantiate a MMCM. Six of the MMCM ou
     - `i_clk_ddr_90`: The fast clock with a 90° phase shift
 - `i_clk_div`: A "slow" clock that is (a) in phase with i_clk_ddr, and (b) exactly 1/2 of the memory frequency
     - `i_clk_div_n`: The slow clock with a 180° phase shift
-- `i_clk_ref`: A 200 MHz clock that drives the IDELAYCTRL primitive, which controls the IDELAY taps used for read calibration[^1]
+- `i_clk_ref`: A 200 MHz clock that drives the IDELAYCTRL primitive, which controls the IDELAY taps used for read calibration[^0]
 
-[^1]: 200 MHz is the nominal frequency that you should aim for. Supported ranges, as per Xilinx documentation, are 190-210 MHz.
+![Screen capture of the clock generator as used in my own application](./vivado-clkgen.png)
+[^0]: 200 MHz is the nominal frequency that you should aim for. Supported range, as per Xilinx documentation, is 190-210 MHz.
 
-Also required is a FIFO module. For ease of use and peace of mind, I opted for one generated using Xilinx's FIFO generator. The size and architecture are up to the user, so long as it is a common clock FIFO with enough width to fit (1) the write address (bank + row + column width, as defined by the signals `in_phy_bank`, `in_phy_row`, and `in_phy_col`), (2) the full write word data (8 times the SDRAM width -- 128 bits for a x16 chip, or as defined by `in_phy_wrdata`), (3) the write data mask (8 bits, as defined by `i8_phy_wrdm`), and (4) one bit to signal either a read (1'b1) or a write (1'b0) command (as defined by `i_phy_cmd_sel`).[^2] The `i_phy_cmd_en` bit is wired to the FIFO "write" flag, while the `o_phy_cmd_full` is wired to the FIFO "full" flag.
+All of the user-facing signals (input and output) are syhcnronous to the slow `i_clk_div` clock.
 
- [^2]: Obviously, the write data and the write data mask bits are "do not care" if a read command is issued (command select bit is high).
+Also required is a FIFO module.[^10] The FIFO needs to be wide enough to fit the controller input signals:
+
+- `[0:0] i_phy_cmd_sel`: The command select bit (`'b1` to read, `'b0` to write)
+- The read or write address, consisting of:
+    - `[p_BANK_W-1:0] in_phy_bank`
+    - `[p_ROW_W-1:0] in_phy_row`
+    - `[p_COL_W-1:0] in_phy_col`
+- `[(8*p_DQ_W)-1:0] in_phy_wrdata`: The write data[^20]
+- `[7:0] in_phy_wrdm`: The write data mask[^20]
+
+![Screen capture of the FIFO generator as used in my own application](./vivado-fifogen.png)
+
+[^10]: For ease of use and peace of mind, I opted for a FIFO generated using Xilinx's FIFO generator. The depth and architecture are up to the user, so long as it is a common clock non-FWFT FIFO with sufficient depth for the application, although Xilinx's minimum depth of 16 should be good enough for any application I can think of.
+
+ [^20]: `in_phy_wrdata` and `i8_phy_wrdm` are "do not care" if a read command is issued (`i_phy_cmd_sel` is 1'b1).
 
 #### Other signals
 
 - `o_phy_rddata_valid` goes high for one clock cycle to indicate that the read data (8 times the SDRAM width -- 128 bits for a x16 chip, or as defined by `on_phy_rddata`) is valid.
 - `i_phy_rst` is a reset signal for IDELAYCTRL, SERDES, and is wired directly to the SDRAM chip. To comply with JEDEC specifications, this signal should not be set to logic low (1'b0) until 500 us after power to the SDRAM is stable. To comply with IDELAYCTRL and SERDES specifications, the signal should be held high until all clocks are stable.
 - `o_phy_init_done` goes high once the core completes the reset and initialization sequence.
-- `*dqs_delay*` and `*dq_delay*` signals control the IDELAY tap values -- unless you are writing your own read calibration module, wire the `*_ce` and `*_inc` inputs to logic low. Connect the input `*_idelay_cnt` and `*_delay_ld` signals to the `rdcal` module. The output `*_idelay_cnt` signals can be ignored and are only exposed for debugging purposes.
 - wire `i2_iserdes_ce` to logic high (2'b11).
+- `*dqs_delay*` and `*dq_delay*` signals control the IDELAY tap values -- unless you are writing your own read calibration module, wire the `*_ce` and `*_inc` inputs to logic low. Connect the input `*_idelay_cnt` and `*_delay_ld` signals to the `rdcal` module. The output `*_idelay_cnt` signals can be ignored and are only exposed for debugging purposes.
+
+#### `rdcal` read calibration module
+Nominally, in DDR3, the read strobe is synchronous to the read data. The controller is required to delay the read strobe so that data is read correctly. The read calibration module attempts to find the optimal delay for the DQ and DQS lines in order to center the read data strobe in the data valid window. The calibration is done on the entire bus simultaneously (not per-byte or per-bit).
+
+Wiring and control of the module is again made to be simple:
+* The `o_phy_*` signals are to be connected from the rdcal module to the controller module:
+    * `o_phy_cmd_en` --> `i_phy_cmd_en`
+    * `o_phy_cmd_sel` --> `i_phy_cmd_sel`
+    * `o3_phy_bank` --> `in_phy_bank`
+    * etc.
+* The `i_rdc_*` signals are used as the inputs of the controller's command FIFO. The controller's FIFO signals are used exclusively by the `rdcal` logic (hijacked) until the read calibration cycle is complete.
+* `o_rdcal_done`: Goes high once the read calibration cycle is complete. No user commands are registered into the command FIFO while this signal is logic low.
+* `o_rdcal_err`: Goes high in case that there is no combination of DQ and DQS IDELAY taps that produce valid read data.
+* `i_rdcal_start`: Is used to start the calibration loop. Read calibration can be re-done at any time, but to run the calibration, 128 bits of the SDRAM's memory will be overwritten with the read calibration word.[^25]
+* The `i_phy_*` signals are to be connected from the controller module to the rdcal module:
+    * `o_phy_init_done` --> `i_phy_init_done`
+    * `o_phy_rddata_valid` --> `i_phy_rddata_valid`
+    * `on_phy_rddata` --> `in_phy_rddata`
+    * etc.
+* The `*delay_*` signals are to be connected from the rdcal module to the controller module:[^27]
+    * `o_dq_delay_ld` --> `in_dq_delay_ld`
+    * `o5_dq_idelay_cnt` --> `in_dq_idelay_cnt`
+    * etc.
+
+[^25]: By default, the read calibration word is `'h0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF`. The default address used for calibration is `27'b0`. These values can be changed by editing the `p_RDCAL_WORD` and `p_RDCAL_BANK`, `p_RDCAL_ROW`, and `p_RDCAL_COL` parameters, respectively.
+
+[^27]: If the signal widths do not match, concatenate the signal output from the read calibration module with itself. E.g. if `in_dqs_idelay_cnt` is defined as `[9:0]`, then connect it with `{o5_dqs_idelay_cnt, o5_dqs_idelay_cnt}`.
 
 ### Discussion
 #### Core operation
@@ -46,7 +88,6 @@ The logic part of this memory controller is relatively simple. Once the initiali
 graph TD;
     A[Reset and initialization sequence]-->ID[Idle state];
     ID-->REF[Refresh];
-    ID-->ID
     REF-->ID
     ID--Command in FIFO-->ACT[Activate]
     ACT--Write command-->WR[Write]
@@ -64,6 +105,10 @@ Refresh requests (raised by a free running refresh timer) take precedence over u
 
 To make use of the high burst data rate of DDR SDRAM, the core supports sequential access of one operation in the same bank and row. To this end, the read or write state is exited once either (a) the refresh timer requests an SDRAM refresh, (b) the user command is different than the previous one (e.g. previous user request was a read, current request is a write, or vice-versa), (c) the user specified bank or row are different than that of the previous read or write command, or (d) the command FIFO becomes empty.
 
+The 2:1 ratio between the DRAM and the core clock frequencies is owed to the supported data widths of the SERDES primitives in "MEMORY" mode.[^30] Because of this, the core effectively employs a 2T command rate such that the controller's valid comands are interleaved with the "DESELECT" command.
+
+[^30]: See UG471, Chapter 3, section "Input Serial-to-Parallel Logic Resources (ISERDESE2)", Table 3-3: Supported Data Widths. With DDR data signaling, only a 2:1 mode is supported.
+
 The controller and PHY are not generic and not replaceable, as the DFI protocol is not employed.
 
 #### FPGA area used
@@ -78,21 +123,21 @@ Xilinx refuses to document or allow third parties to access the PHASER_IN and PH
 
 This core works around the issue of the PHASER_IN primitive by instead instantiating the IDELAYE2 primitives to calibrate the read data strobe to the valid read data window, as demonstrated in the optional `rdcal` module. This method has worked well in testing.
 
-The lack of access to the PHASER_OUT primitive is more apparent: DDR3 memory requires that the write data strobe is properly synced to the output clock. For this purpose, JEDEC has defined a new feature in DDR3 (as compared to DDR2), called write leveling. Yet, the lack of access to primitives that could delay the output signals[^3] makes write leveling impossible outside of Xilinx's own MIG.
+The lack of access to the PHASER_OUT primitive is more apparent: DDR3 memory requires that the write data strobe is properly synced to the output clock. For this purpose, JEDEC has defined a new feature in DDR3 (as compared to DDR2), called write leveling. Yet, the lack of access to primitives that could delay the output signals[^40] makes write leveling impossible outside of Xilinx's own MIG.
 
-[^3]: There exists an ODELAYE2 primitive that is well documented, but only available in HP banks. The Spartan FPGA only has HR banks.
+[^40]: There exists an ODELAYE2 primitive that is well documented, but only available in HP banks. The Spartan FPGA only has HR banks.
 
 #### Timing constraints
-The lack of proper timing constraints means that the Vivado timing analysis tools cannot help in meeting the SDRAM's timing. Thus, a bitstream may not work across PVT, though it may appear to work during testing.[^4]
+The lack of proper timing constraints means that the Vivado timing analysis tools cannot help in meeting the SDRAM's timing. Thus, a bitstream may not work across PVT (process, voltage, and temperature), though it may appear to work during testing.[^50]
 
-[^4]: In my testing of raising the operating frequency of the core beyond 300 MHz, the failure of timing would sooner be apparent in garbled writes (because of no write leveling) rather than a complete timing failure across the board. For what it's worth (read: not much -- this is anecdotal), I could not get the core to fail in any way at 125 MHz, but, again, I cannot guarantee functionality across PVT.
+[^50]: In my testing of raising the operating frequency of the core beyond 300 MHz, the failure of timing would sooner be apparent in garbled writes (because of no write leveling) rather than a complete timing failure across the board. For what it's worth (read: not much -- this is anecdotal), I could not get the core to fail in any way at 125 MHz, but, again, I cannot guarantee functionality across PVT.
 
-I haven't delved into setting up timing constraints for this projects, nor do I plan to in the near future. If you are an XDC guru and wish to contribute to this controller, feel free to contact me, open a bug, or a pull request.
+I haven't delved into setting up timing constraints for this project, nor do I plan to in the near future. If you are an XDC guru and wish to contribute to this controller, feel free to contact me, open a bug, or a pull request.
 
 #### Further reading
 This core is heavily influenced by Xilinx's own XAPP721 application note, which details a similar PHY as employed here, used for DDR2 SDRAM on a Virtex-4 FPGA. Various DDR SDRAM manufacturers' application notes such as Micron's TN-04-54 ("High-Speed DRAM Controller Design") can also be of great help in regards to memory controller and PHY design.
 
-To demistify the workings of DDR3 memory, there is of course the complete DDR3 specification in JEDEC file JESD79-3F. Also applicable here are various DDR3 SDRAM datasheets and application notes by silicon manufacturers (e.g. Micron, Samsung, SK hynix, TI, Philips, even MIT lecture notes), which act as abridged and slightly re-worded versions of the JEDEC spec. Further and more verbose instructions can be found in files that DDR SDRAM manufacturers publish alongside part datasheet, such as Micron's excellent "TN-41" series of application notes. 
+To demistify the workings of DDR3 memory, there is of course the complete DDR3 specification in JEDEC file JESD79-3F. Also applicable here are various DDR3 SDRAM datasheets and application notes by silicon manufacturers (e.g. Micron, Samsung, SK hynix, TI, Philips, even MIT lecture notes), which act as abridged and slightly re-worded versions of the JEDEC spec. Further and more verbose instructions can be found in files that DDR SDRAM manufacturers publish alongside part datasheets, such as Micron's excellent "TN-41" series of application notes. 
 
 For better understanding of the FPGA primitives this PHY is built from, the following Xilinx documents are invaluable (albeit not faultless) resources:
 - UG471: "7 Series FPGAs SelectIO Resources"
@@ -101,7 +146,7 @@ For better understanding of the FPGA primitives this PHY is built from, the foll
 
 A similar DDR3 core focusing only on "DLL disabled" mode was written by @ultraembedded, and is available here: https://github.com/ultraembedded/core_ddr3_controller
 
-Of course it would be remiss of me not to mention
+Of course I would be remiss if I didn't mention
 - reddit's FPGA community at https://www.reddit.com/r/FPGA/
 - Digilent's own forums at https://forum.digilent.com/
 - the Xilinx support website at https://support.xilinx.com/
