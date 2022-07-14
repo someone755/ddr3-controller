@@ -80,6 +80,11 @@ Wiring and control of the module is again made to be simple:
 
 [^27]: If the signal widths do not match, concatenate the signal output from the read calibration module with itself. E.g. if `in_dqs_idelay_cnt` is defined as `[9:0]`, then connect it with `{o5_dqs_idelay_cnt, o5_dqs_idelay_cnt}`.
 
+#### Example project
+An example project/top module for the Arty S7-50 board is currently available [in another repository](https://github.com/someone755/arty_s7_playground/blob/master/ddr3/ddr3.srcs/sources_1/ddr3_x16_cust_top.v).[^28] The Python script in that repository can also be used to test the functionality of the core.
+
+[^28]: I admit the code is far from pretty, but should be good enough to see how the core and read calibration module are meant to be connected in a functional application.
+
 ### Discussion
 #### Core operation
 The logic part of this memory controller is relatively simple. Once the initialization is complete, the core loops and periodically requests a refresh of the SDRAM. Outside that, if the input command FIFO is not empty, the command is read out, and the proper sequence of commands is executed, e.g. ACT -> RD -> PRE for one issued read command in the command FIFO. A simplified state diagram is drawn below:
