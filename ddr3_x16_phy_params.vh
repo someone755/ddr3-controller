@@ -13,10 +13,11 @@ localparam	lpdiv_RL	= lp_RL/2;
 // Modified parameters:
 localparam	lpdiv_RTW	= (lp_RL + lp_CCD + 2 - lp_WL + 1)/2;	// READ-to-WRITE = RL + CCD + 2 CK - WL (+1 to round off correctly)
 localparam	lpdiv_WTR	= (lp_WL + lp_BL/2 + (p_WTR/p_DDR_CK_PS+1))/2;	// WRITE-to-READ = WL + BL/2 + WTR (WTR after WRITE DQS postamble)
-localparam	lpdiv_WR	= (lp_WL + lp_BL/2 + (p_WR/p_DDR_CK_PS+1))/2;	// WRITE-to-PRECHARGE = WL + BL/2 + WR (WR after WRITE DQS postamble)
+localparam	lpdiv_WR	= 5;	// WRITE-to-PRECHARGE = WL + BL/2 + WR (WR after WRITE DQS postamble)
+	// WR (min, DLL OFF) = 4 CK, but minimum allowed in MR0 is 5 CK
 
 // MRx is {BA[3:0], A[13:0]}
-					  /* 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
+					  /* 16 15 14 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
 localparam lp_MR0 = 17'b__0__0__0__0__0__0__0__1__1__0__0__1__0__0__0__0__0;
 localparam lp_MR1 = 17'b__0__0__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 localparam lp_MR2 = 17'b__0__1__0__0__0__0__0__0__0__0__0__0__0__1__0__0__0;
@@ -35,13 +36,14 @@ localparam	lpdiv_RL	= lp_RL/2;
 localparam	lpdiv_RTW	= (lp_RL + lp_CCD + 2 - lp_WL + 1)/2;	// READ-to-WRITE = RL + CCD + 2 CK - WL (+1 to round off correctly)
 localparam	lpdiv_WTR	= (lp_WL + lp_BL/2 + (p_WTR/p_DDR_CK_PS+1))/2;	// WRITE-to-READ = WL + BL/2 + WTR (WTR after WRITE DQS postamble)
 localparam	lpdiv_WR	= (lp_WL + lp_BL/2 + (p_WR/p_DDR_CK_PS+1))/2;	// WRITE-to-PRECHARGE = WL + BL/2 + WR (WR after WRITE DQS postamble)
+	// WR = roundup(tWR/tCK) = roundup(15 ns / (3.3~3.0 ss)) = 5 CK
 					  /* 16 15 14 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
 localparam lp_MR0 = 17'b__0__0__0__0__0__0__0__1__1__0__0__0__1__0__0__0__0;
 localparam lp_MR1 = 17'b__0__0__1__0__0__0__0__0__0__0__1__0__0__0__1__0__0;
 localparam lp_MR2 = 17'b__0__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 localparam lp_MR3 = 17'b__0__1__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 
-// #################### TODO 300-400 MHz #################### 
+// #################### 333-400 MHz #################### 
 end else if ((p_DDR_CK_PS > 2499) & (p_DDR_CK_PS < 3334)) begin: DLL
 localparam lp_CL = 6;
 localparam lp_CWL = 5;
@@ -54,14 +56,35 @@ localparam	lpdiv_RL	= lp_RL/2;
 localparam	lpdiv_RTW	= (lp_RL + lp_CCD + 2 - lp_WL + 1)/2;	// READ-to-WRITE = RL + CCD + 2 CK - WL (+1 to round off correctly)
 localparam	lpdiv_WTR	= (lp_WL + lp_BL/2 + (p_WTR/p_DDR_CK_PS+1))/2;	// WRITE-to-READ = WL + BL/2 + WTR (WTR after WRITE DQS postamble)
 localparam	lpdiv_WR	= (lp_WL + lp_BL/2 + (p_WR/p_DDR_CK_PS+1))/2;	// WRITE-to-PRECHARGE = WL + BL/2 + WR (WR after WRITE DQS postamble)
-					  /* 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
+	// WR = roundup(tWR/tCK) = roundup(15 ns / (3.0~2.5 ss)) = 6 CK
+					  /* 16 15 14 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
 localparam lp_MR0 = 17'b__0__0__0__0__0__0__1__0__1__0__0__1__0__0__0__0__0;
 localparam lp_MR1 = 17'b__0__0__1__0__0__0__0__0__0__0__1__0__0__0__1__0__0;
 localparam lp_MR2 = 17'b__0__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 localparam lp_MR3 = 17'b__0__1__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 
+// #################### TODO 400-466 MHz #################### 
+end else if ((p_DDR_CK_PS > 2141) & (p_DDR_CK_PS < 2499)) begin: DLL
+localparam lp_CL = 7;
+localparam lp_CWL = 6;
+localparam lp_AL = 0;
+localparam lp_WL = lp_CWL + lp_AL;
+localparam lp_RL = lp_CL + lp_AL;
+localparam	lpdiv_WL	= lp_WL/2;
+localparam	lpdiv_RL	= lp_RL/2;
+// Modified parameters:
+localparam	lpdiv_RTW	= (lp_RL + lp_CCD + 2 - lp_WL + 1)/2;	// READ-to-WRITE = RL + CCD + 2 CK - WL (+1 to round off correctly)
+localparam	lpdiv_WTR	= (lp_WL + lp_BL/2 + (p_WTR/p_DDR_CK_PS+1))/2;	// WRITE-to-READ = WL + BL/2 + WTR (WTR after WRITE DQS postamble)
+localparam	lpdiv_WR	= (lp_WL + lp_BL/2 + (p_WR/p_DDR_CK_PS+1))/2;	// WRITE-to-PRECHARGE = WL + BL/2 + WR (WR after WRITE DQS postamble)
+		// WR = roundup(tWR/tCK) = roundup(15 ns / (2.500~2.143 ss)) = 7 (466 MHz)
+		// WR = roundup(tWR/tCK) = roundup(15 ns / (2.143~1.875 ns)) = 8 (533 MHz)
+					  /* 16 15 14 13 12 11 10 ~9 ~8 ~7 ~6 ~5 ~4 ~3 ~2 ~1 ~0 */
+localparam lp_MR0 = 17'b__0__0__0__0__0__0__1__1__1__0__0__1__1__0__0__0__0;
+localparam lp_MR1 = 17'b__0__0__1__0__0__0__0__0__0__0__1__0__0__0__1__0__0;
+localparam lp_MR2 = 17'b__0__1__0__0__0__0__0__0__0__0__0__0__0__1__0__0__0;
+localparam lp_MR3 = 17'b__0__1__1__0__0__0__0__0__0__0__0__0__0__0__0__0__0;
 
-// #################### 125-300, >400 MHz ERROR #################### 
+// #################### 125-300, >466 MHz ERROR #################### 
 end else begin: DLL
 localparam lp_CL = 0;
 localparam lp_CWL = 0;
