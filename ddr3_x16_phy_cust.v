@@ -11,14 +11,19 @@ module ddr3_x16_phy_cust #(
 	parameter	p_IDELAY_INIT_DQS	= 6,	// max 31; Should be '0' for IDELAY_TYPE = "VAR_LOAD"
 	parameter	p_IDELAY_INIT_DQ	= 10,
 	
-	parameter	p_RD_DELAY	= 4,	// delay in CK from RD CMD to valid ISERDES data
+	parameter	p_RD_DELAY	= 6,	// delay in CK from RD CMD to valid ISERDES data
 									// DLL = "OFF"
-									// 	p_OUTPUT_PIPE = "FALSE":	"3"
-									// 	p_OUTPUT_PIPE = "TRUE":		"4"
-									// DLL = "ON", CK > 333 MHz
-									//	p_OUTPUT_PIPE = "TRUE":		"4"
-	
-	parameter	p_OUTPUT_PIPE	= "TRUE",	// Should be "TRUE" for DLL="ON" speeds, or DRAM timing fails
+									//	CLK < 125 MHz
+									// 		p_OUTPUT_PIPE = "TRUE":		"5" <?>
+									// DLL = "ON":
+									//	300 MHz < CLK < 333 MHz
+									//		p_OUTPUT_PIPE = "TRUE":		"6" <?>
+									// 	333 MHz < CLK < 400 MHz
+									//		p_OUTPUT_PIPE = "TRUE":		"6" <?>
+									//	400 MHz  < CLK < 466 MHz
+									//		p_OUTPUT_PIPE = "TRUE":		"6" <?>
+
+	parameter	p_OUTPUT_PIPE	= "TRUE",	// Should be "TRUE" for DLL="ON" speeds, or timing fails
 
 	parameter	p_BANK_W	= 3,	// bank width
 	parameter	p_ROW_W		= 14,	// row width
@@ -28,10 +33,11 @@ module ddr3_x16_phy_cust #(
 
 	parameter	REFCLK_FREQUENCY	= 200.0,	// IDELAY resolution = 1000/(32 x 2 x REFCLK_FREQUENCY) [ns]
 												// For 200 MHz, tap delay is 0.078125 ns
+												// For 300 MHz, tap delay is 0.052083 ns
 	parameter	p_DDR_FREQ_MHZ	= 300,	// use ck2ps(p_DDR_FREQ_MHZ) to get period in ps
 										// JEDEC allows > 300 MHz with DLL ON, or < 125 MHZ with DLL OFF
 	parameter	p_DDR_CK_PS		= `ck2ps(p_DDR_FREQ_MHZ),
-	
+
 		// Timing parameters //
 								// (ps)					// Description
 	parameter	p_CKE			= `max2(3*p_DDR_CK_PS, 5_000),	// CKE minimum pulse width
@@ -157,6 +163,20 @@ reg	[0:3]	r4_oserdes_dqs_par = 'hF;
 reg	[0:(4*p_DQ_W)-1]	rn_oserdes_dq_par = {(4*p_DQ_W){1'b1}};
 reg	[0:3]	r4_oserdes_dm_par = 'h0;
 
+// ncs oserdes output
+wire	w_oserdes_ncs_ser;
+// wire	w_ncs = (DLL.lp_CWL % 2) ? i_clk_div_n : i_clk_div;
+//	nCS is now handled by OSERDES
+// cmd oserdes output
+wire	[2:0]	w3_oserdes_cmd_ser;
+wire	[2:0]	w3_cmd_tristate;
+// addr oserdes output
+wire	[p_ADDR_W-1:0]	wn_addr_tristate;
+wire	[p_ADDR_W-1:0]	wn_oserdes_addr_ser;
+// bank oserdes output
+wire	[p_BANK_W-1:0]	wn_bank_tristate;
+wire	[p_BANK_W-1:0]	wn_oserdes_bank_ser;
+
 // DDR tristate values (into OSERDES)
 reg	[0:3]	r4_tristate_dqs = 'hF;	
 reg	[0:3]	r4_tristate_dq = 'hF;
@@ -164,7 +184,7 @@ reg	[0:3]	r4_tristate_dq = 'hF;
 wire	[0:(4*p_DQ_W)-1]	wn_iserdes_par;	// data read from memory (from ISERDES)
 
 wire	[2:1]	w2_iserdes_ce;	// ISERDES primitive clock enable (2:1); either 'b00 or 'b01/10
-assign w2_iserdes_ce = i2_iserdes_ce;//-2'b11;
+assign w2_iserdes_ce = i2_iserdes_ce;
 
 // IDELAY tap value counter output
 wire	[(p_DQ_W/8)*5-1:0]	wn_dqs_idelay_cnt;
@@ -174,7 +194,6 @@ if (p_DQ_W > 8)
 	assign wn_dq_idelay_cnt_few = {wn_dq_idelay_cnt_many[8], wn_dq_idelay_cnt_many[0]};
 else
 	assign wn_dq_idelay_cnt_few = wn_dq_idelay_cnt_many[0];
-
 
 // W/R command FIFO
 wire	[lp_CMDFIFO_WIDTH-1:0]	wn_cmdfifo_din;
@@ -194,7 +213,12 @@ assign	{w_cmdfifo_op, wn_cmdfifo_bank, wn_cmdfifo_row, wn_cmdfifo_col, wn_cmdfif
 
 //###############################################
 //## PRIMITIVE DECLARATIONS:
+//	[x] cmd oserdes
+//	[x] ncs oserdes
+//	[x] addr oserdes
+//	[x]	ba oserdes
 //	[x]	clk obuf
+//	[x]	clk oserdes
 //	[x] idelayctrl
 //	[x]	dqs iobuf
 //	[x]	dqs idelay
@@ -207,6 +231,186 @@ assign	{w_cmdfifo_op, wn_cmdfifo_bank, wn_cmdfifo_row, wn_cmdfifo_col, wn_cmdfif
 //###############################################
 genvar i; // loop variable for generate blocks
 /////////////////////////////////////////////////
+// CMD OSERDES
+/////////////////////////////////////////////////
+generate 
+for (i = 0; i < 3; i = i+1) begin
+OSERDESE2 #(
+	.DATA_RATE_OQ("DDR"), // DDR, SDR
+	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
+	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
+	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
+	.SERDES_MODE("MASTER")
+) oserdes_cmd_inst (
+	.OFB(), // 1-bit output: Feedback path for data
+	.OQ(w3_oserdes_cmd_ser[i]), // 1-bit output: Data path output
+	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
+	.SHIFTOUT1(),
+	.SHIFTOUT2(),
+	.TBYTEOUT(), // 1-bit output: Byte group tristate
+	.TFB(), // 1-bit output: 3-state control
+	.TQ(w3_cmd_tristate[i]), // 1-bit output: 3-state control
+	.CLK(i_clk_ddr), // 1-bit input: High speed clock
+	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
+	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
+	.D1(w3_cmd[i]),
+	.D2(w3_cmd[i]),
+	.D3(w3_cmd[i]),
+	.D4(w3_cmd[i]),
+	.D5(),
+	.D6(),
+	.D7(),
+	.D8(),
+	.OCE(1'b1), // 1-bit input: Output data clock enable
+	.RST(r_phy_rst), // 1-bit input: Reset
+	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
+	.SHIFTIN1(1'b0),
+	.SHIFTIN2(1'b0),
+	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
+	.T1(1'b0),
+	.T2(1'b0),
+	.T3(1'b0),
+	.T4(1'b0),
+	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
+	.TCE(1'b1) // 1-bit input: 3-state clock enable
+);
+end
+endgenerate
+/////////////////////////////////////////////////
+// nCS OSERDES
+/////////////////////////////////////////////////
+OSERDESE2 #(
+	.DATA_RATE_OQ("DDR"), // DDR, SDR
+	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
+	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
+	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
+	.SERDES_MODE("MASTER")
+) oserdes_ncs_inst (
+	.OFB(), // 1-bit output: Feedback path for data
+	.OQ(w_oserdes_ncs_ser), // 1-bit output: Data path output
+	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
+	.SHIFTOUT1(),
+	.SHIFTOUT2(),
+	.TBYTEOUT(), // 1-bit output: Byte group tristate
+	.TFB(), // 1-bit output: 3-state control
+	.TQ(w_ncs_tristate), // 1-bit output: 3-state control
+	.CLK(i_clk_ddr), // 1-bit input: High speed clock
+	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
+	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
+	.D1((DLL.lp_CWL % 2)),
+	.D2((DLL.lp_CWL % 2)),
+	.D3(!(DLL.lp_CWL % 2)),
+	.D4(!(DLL.lp_CWL % 2)),
+	.D5(),
+	.D6(),
+	.D7(),
+	.D8(),
+	.OCE(1'b1), // 1-bit input: Output data clock enable
+	.RST(r_phy_rst), // 1-bit input: Reset
+	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
+	.SHIFTIN1(1'b0),
+	.SHIFTIN2(1'b0),
+	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
+	.T1(1'b0),
+	.T2(1'b0),
+	.T3(1'b0),
+	.T4(1'b0),
+	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
+	.TCE(1'b1) // 1-bit input: 3-state clock enable
+);
+/////////////////////////////////////////////////
+// ADDR OSERDES
+/////////////////////////////////////////////////
+generate
+for (i = 0; i < p_ADDR_W; i = i+1) begin
+OSERDESE2 #(
+	.DATA_RATE_OQ("DDR"), // DDR, SDR
+	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
+	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
+	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
+	.SERDES_MODE("MASTER")
+) oserdes_ncs_inst (
+	.OFB(), // 1-bit output: Feedback path for data
+	.OQ(wn_oserdes_addr_ser[i]), // 1-bit output: Data path output
+	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
+	.SHIFTOUT1(),
+	.SHIFTOUT2(),
+	.TBYTEOUT(), // 1-bit output: Byte group tristate
+	.TFB(), // 1-bit output: 3-state control
+	.TQ(wn_addr_tristate[i]), // 1-bit output: 3-state control
+	.CLK(i_clk_ddr), // 1-bit input: High speed clock
+	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
+	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
+	.D1(wn_ddr_addr[i]),
+	.D2(wn_ddr_addr[i]),
+	.D3(wn_ddr_addr[i]),
+	.D4(wn_ddr_addr[i]),
+	.D5(),
+	.D6(),
+	.D7(),
+	.D8(),
+	.OCE(1'b1), // 1-bit input: Output data clock enable
+	.RST(r_phy_rst), // 1-bit input: Reset
+	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
+	.SHIFTIN1(1'b0),
+	.SHIFTIN2(1'b0),
+	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
+	.T1(1'b0),
+	.T2(1'b0),
+	.T3(1'b0),
+	.T4(1'b0),
+	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
+	.TCE(1'b1) // 1-bit input: 3-state clock enable
+);
+end
+endgenerate
+/////////////////////////////////////////////////
+// BANK ADDRESS OSERDES
+/////////////////////////////////////////////////
+generate
+for (i = 0; i < p_BANK_W; i = i+1) begin
+OSERDESE2 #(
+	.DATA_RATE_OQ("DDR"), // DDR, SDR
+	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
+	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
+	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
+	.SERDES_MODE("MASTER")
+) oserdes_ncs_inst (
+	.OFB(), // 1-bit output: Feedback path for data
+	.OQ(wn_oserdes_bank_ser[i]), // 1-bit output: Data path output
+	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
+	.SHIFTOUT1(),
+	.SHIFTOUT2(),
+	.TBYTEOUT(), // 1-bit output: Byte group tristate
+	.TFB(), // 1-bit output: 3-state control
+	.TQ(wn_bank_tristate[i]), // 1-bit output: 3-state control
+	.CLK(i_clk_ddr), // 1-bit input: High speed clock
+	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
+	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
+	.D1(wn_ddr_bank[i]),
+	.D2(wn_ddr_bank[i]),
+	.D3(wn_ddr_bank[i]),
+	.D4(wn_ddr_bank[i]),
+	.D5(),
+	.D6(),
+	.D7(),
+	.D8(),
+	.OCE(1'b1), // 1-bit input: Output data clock enable
+	.RST(r_phy_rst), // 1-bit input: Reset
+	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
+	.SHIFTIN1(1'b0),
+	.SHIFTIN2(1'b0),
+	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
+	.T1(1'b0),
+	.T2(1'b0),
+	.T3(1'b0),
+	.T4(1'b0),
+	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
+	.TCE(1'b1) // 1-bit input: 3-state clock enable
+);
+end
+endgenerate
+/////////////////////////////////////////////////
 // DDR CLOCK DIFFERENTIAL OUTPUT BUFFER
 /////////////////////////////////////////////////
 OBUFDS #(
@@ -214,7 +418,49 @@ OBUFDS #(
 ) obufds_ck_inst (
 	.O(o_ddr_ck_p),
 	.OB(o_ddr_ck_n),
-	.I(i_clk_ddr_n)
+	.I(w_clk_ddr_n)
+);
+/////////////////////////////////////////////////
+// CLK OSERDES
+/////////////////////////////////////////////////
+OSERDESE2 #(
+	.DATA_RATE_OQ("DDR"), // DDR, SDR
+	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
+	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
+	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
+	.SERDES_MODE("MASTER")
+) oserdes_clk_inst (
+	.OFB(), // 1-bit output: Feedback path for data
+	.OQ(w_clk_ddr_n), // 1-bit output: Data path output
+	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
+	.SHIFTOUT1(),
+	.SHIFTOUT2(),
+	.TBYTEOUT(), // 1-bit output: Byte group tristate
+	.TFB(), // 1-bit output: 3-state control
+	.TQ(w_clk_tristate), // 1-bit output: 3-state control
+	.CLK(i_clk_ddr_n), // 1-bit input: High speed clock
+	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
+	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
+	.D1(1'b1),
+	.D2(1'b0),
+	.D3(1'b1),
+	.D4(1'b0),
+	.D5(),
+	.D6(),
+	.D7(),
+	.D8(),
+	.OCE(1'b1), // 1-bit input: Output data clock enable
+	.RST(r_phy_rst), // 1-bit input: Reset
+	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
+	.SHIFTIN1(1'b0),
+	.SHIFTIN2(1'b0),
+	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
+	.T1(1'b0),
+	.T2(1'b0),
+	.T3(1'b0),
+	.T4(1'b0),
+	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
+	.TCE(1'b1) // 1-bit input: 3-state clock enable
 );
 /////////////////////////////////////////////////
 // IDELAYCTRL to calibrate IDELAY/ODELAY blocks
@@ -567,7 +813,7 @@ end // init_mr_store: Store MR register values
 
 // read data valid signals
 reg	r_rd_op = 1'b0;	// high when r3_cmd == lp_CMD_RD
-reg	[5:0]	rn_rd_op_delayed = 'b0;	// r_rd_op pipe (delay)
+reg	[p_RD_DELAY:0]	rn_rd_op_delayed = 'b0;	// r_rd_op pipe (delay)
 reg	[1:0]	r2_iserdes_valid = 'b0;	// counts 2*divCLK cycles per r_rd_op
 reg	r_rddata_valid = 1'b0;			// full BL8 read word valid 
 
@@ -606,9 +852,9 @@ reg	[2:0]	r3_cmd	= lp_CMD_NOP;	// command bus {nRAS, nCAS, nWE}
 reg	[2:0]	r3_cmd_pipe	= lp_CMD_NOP;
 
 // output multiplexers: make output 1 divCK delayed or no (improves timing)
-wire	w_oserdes_trig						= (p_OUTPUT_PIPE == "TRUE") ? r_oserdes_trig_pipe	: r_oserdes_trig;
-wire	[(p_DQ_W*8)-1:0]	wn_write_data	= (p_OUTPUT_PIPE == "TRUE") ? rn_write_data_pipe	: rn_write_data;
-wire	[7:0]	w8_write_mask				= (p_OUTPUT_PIPE == "TRUE") ? r8_write_mask_pipe	: r8_write_mask;
+wire	w_oserdes_trig						= (p_OUTPUT_PIPE == "TRUE") ? rn_wr_op_delayed[1]	: rn_wr_op_delayed[0];
+wire	[(p_DQ_W*8)-1:0]	wn_write_data	= (p_OUTPUT_PIPE == "TRUE") ? rn_write_data_delayed[1]	: rn_write_data_delayed[0];
+wire	[7:0]	w8_write_mask				= (p_OUTPUT_PIPE == "TRUE") ? r8_write_mask_delayed[1]	: r8_write_mask_delayed[0];
 
 wire	w_ddr_cke							= (p_OUTPUT_PIPE == "TRUE") ? r_ddr_cke_pipe		: r_ddr_cke;
 
@@ -617,24 +863,33 @@ wire	[2:0]	w3_cmd						= (p_OUTPUT_PIPE == "TRUE") ? r3_cmd_pipe			: r3_cmd;
 wire	[(p_BANK_W-1):0]	wn_ddr_bank		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_bank_pipe		: rn_ddr_bank;
 wire	[(p_ADDR_W-1):0]	wn_ddr_addr		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_addr_pipe		: rn_ddr_addr;
 
+reg	r_wr_op = 1'b0;
+reg	[1:0]	rn_wr_op_delayed = 6'b0;
+reg	[(p_DQ_W*8)-1:0]	rn_write_data_delayed	[1:0];
+reg	[7:0]	r8_write_mask_delayed	[1:0];
+
 // OSERDES TRIGGER FLAG & OSERDES DATA
-always @(posedge i_clk_div) begin: oserdes_signal
-	// The OSERDES trigger flag is 1'b0 until timer reaches 1 or 0
-	//	(depends on WL, which depends on frequency) in WR state and remains
-	//	high until WR state is exited. This works for single bursts and
-	//	sequential writes.
+always @(posedge i_clk_div) begin: oserdes_input
+	// The CWL difference (5 vs 6) is taken up by the nCS signal being shifted
+	//	180°. In previous designs the oserdes state machine was to be triggered
+	//	either 1 or 0 divck cycles early, as calculated by
+	//	(lpdiv_WL_MAX - DLL.lpdiv_WL)
+	r_wr_op <= 1'b0;
 	case (rn_state_curr)
 	STATE_WR: begin
-		if (rn_state_tmr == (lpdiv_WL_MAX - DLL.lpdiv_WL)) begin
-			r_oserdes_trig <= 1'b1;
+		if (rn_state_tmr == 0) begin
+			r_wr_op <= 1'b1;
 			rn_write_data <= rn_wrd_pipe[0];
 			r8_write_mask <= r8_wrm_pipe[0];
 		end
 	end
-	default: begin
-		r_oserdes_trig <= 1'b0;
-	end
+	default: r_wr_op <= 1'b0;
 	endcase
+	rn_wr_op_delayed <= {rn_wr_op_delayed[0], r_wr_op};
+	rn_write_data_delayed[1] <= rn_write_data_delayed[0];
+	rn_write_data_delayed[0] <= rn_write_data;
+	r8_write_mask_delayed[1] <= r8_write_mask_delayed[0];
+	r8_write_mask_delayed[0] <= r8_write_mask;
 end
 // CKE PIN
 always @(posedge i_clk_div) begin: cke_ctrl
@@ -714,7 +969,6 @@ always @(posedge i_clk_div) begin: init_flag_ctrl
 	else if (rn_state_curr == STATE_IDLE)
 		r_init_done <= 1'b1;
 end
-
 // UPCOMING STATE
 always @(posedge i_clk_div) begin: state_2ahead
 	r_cmdfifo_rd <= 1'b0;
@@ -944,6 +1198,7 @@ always @(posedge i_clk_div) begin: addr_ctrl
 	end
 	endcase
 end
+// RD DATA SYNC & DATA VALID FLAG 
 always @(posedge i_clk_div) begin: rd_valid_ctrl
 	r_rd_op <= 1'b0;
 	case (rn_state_curr)
@@ -953,7 +1208,7 @@ always @(posedge i_clk_div) begin: rd_valid_ctrl
 	end
 	default: r_rd_op <= 1'b0;
 	endcase
-	rn_rd_op_delayed <= {rn_rd_op_delayed[4:0], r_rd_op};
+	rn_rd_op_delayed <= {rn_rd_op_delayed[p_RD_DELAY-1:0], r_rd_op};
 	
 	case (r2_iserdes_valid)
 	'b01: begin
@@ -975,7 +1230,7 @@ always @(posedge i_clk_div) begin: rd_valid_ctrl
 	if (r2_iserdes_valid[1])
 		if(!r2_iserdes_valid[0])
 			rn_rddata[8*p_DQ_W-1 : 4*p_DQ_W] <= wn_iserdes_par;
-		else// if (r2_iserdes_valid[0])
+		else // if (r2_iserdes_valid[0])
 			rn_rddata[4*p_DQ_W-1:0] <= wn_iserdes_par;
 			
 	if (r2_iserdes_valid == 2'b11)
@@ -1121,10 +1376,15 @@ assign on_dqs_idelay_cnt = wn_dqs_idelay_cnt;
 // Hardware out assigns
 assign o_ddr_nrst	= r_ddr_nrst;
 
-assign o_ddr_ncs	= (DLL.lp_CWL % 2) ? i_clk_div_n : i_clk_div;
-assign o_ddr_nras 	= w3_cmd[2];
-assign o_ddr_ncas 	= w3_cmd[1];
-assign o_ddr_nwe 	= w3_cmd[0];
+//assign o_ddr_ncs	= (DLL.lp_CWL % 2) ? i_clk_div_n : i_clk_div;
+//assign o_ddr_nras 	= w3_cmd[2];
+//assign o_ddr_ncas 	= w3_cmd[1];
+//assign o_ddr_nwe 	= w3_cmd[0];
+
+assign o_ddr_ncs	= w_oserdes_ncs_ser;
+assign o_ddr_nras 	= w3_oserdes_cmd_ser[2];
+assign o_ddr_ncas 	= w3_oserdes_cmd_ser[1];
+assign o_ddr_nwe 	= w3_oserdes_cmd_ser[0];
 
 assign on_ddr_dm	= wn_dm_wr;
 
@@ -1132,6 +1392,9 @@ assign o_ddr_cke	= w_ddr_cke;
 
 assign o_ddr_odt	= 1'b0;
 
-assign on_ddr_bank	= wn_ddr_bank;
-assign on_ddr_addr	= wn_ddr_addr;
+//assign on_ddr_bank	= wn_ddr_bank;
+//assign on_ddr_addr	= wn_ddr_addr;
+
+assign on_ddr_bank	= wn_oserdes_bank_ser;
+assign on_ddr_addr	= wn_oserdes_addr_ser;
 endmodule
