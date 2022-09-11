@@ -60,10 +60,8 @@ module ddr3_x16_phy_cust #(
 	input	[1:0]	i2_iserdes_ce,
 	
 	input	i_clk_ddr,		// memory bus clock frequency
-	input	i_clk_ddr_n,	// actual external clock -- MMCM control is more accurate than a local inversion
 	input	i_clk_ddr_90,	// same but delayed by 90 deg, used to generate output DQ from OSERDES
 	input	i_clk_div,		// half of bus clock frequency
-	input	i_clk_div_n,
 	input	i_clk_ref,	// Used for IDELAYCTRL (controls taps for input DQS IDELAY), must be in range 190-210 MHz or
 						//	290-310 MHz, as per p_REFCLK_FREQUENCY
 	
@@ -443,13 +441,13 @@ OSERDESE2 #(
 	.TBYTEOUT(), // 1-bit output: Byte group tristate
 	.TFB(), // 1-bit output: 3-state control
 	.TQ(w_clk_tristate), // 1-bit output: 3-state control
-	.CLK(i_clk_ddr_n), // 1-bit input: High speed clock
+	.CLK(i_clk_ddr), // 1-bit input: High speed clock
 	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
 	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1(1'b1),
-	.D2(1'b0),
-	.D3(1'b1),
-	.D4(1'b0),
+	.D1(1'b0),
+	.D2(1'b1),
+	.D3(1'b0),
+	.D4(1'b1),
 	.D5(),
 	.D6(),
 	.D7(),
