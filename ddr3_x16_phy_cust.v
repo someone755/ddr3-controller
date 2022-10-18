@@ -162,10 +162,6 @@ reg	[0:3]	r4_oserdes_dqs_par = 'hF;
 reg	[0:(4*p_DQ_W)-1]	rn_oserdes_dq_par = {(4*p_DQ_W){1'b1}};
 reg	[0:3]	r4_oserdes_dm_par = 'h0;
 
-// ncs oserdes output
-wire	w_oserdes_ncs_ser;
-// wire	w_ncs = (DLL.lp_CWL % 2) ? i_clk_div_n : i_clk_div;
-//	nCS is now handled by OSERDES
 // cmd oserdes output
 wire	[2:0]	w3_oserdes_cmd_ser;
 wire	[2:0]	w3_cmd_tristate;
@@ -217,7 +213,6 @@ assign	{w_cmdfifo_op, wn_cmdfifo_bank, wn_cmdfifo_row, wn_cmdfifo_col, wn_cmdfif
 //###############################################
 //## PRIMITIVE DECLARATIONS:
 //	[x] cmd oserdes
-//	[x] ncs oserdes
 //	[x] addr oserdes
 //	[x]	ba oserdes
 //	[x]	clk obuf
@@ -256,10 +251,10 @@ OSERDESE2 #(
 	.CLK(i_clk_ddr), // 1-bit input: High speed clock
 	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
 	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1(w3_cmd[i]),
-	.D2(w3_cmd[i]),
-	.D3(w3_cmd[i]),
-	.D4(w3_cmd[i]),
+	.D1(!(DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
+	.D2(!(DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
+	.D3( (DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
+	.D4( (DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
 	.D5(),
 	.D6(),
 	.D7(),
@@ -280,48 +275,6 @@ OSERDESE2 #(
 end
 endgenerate
 /////////////////////////////////////////////////
-// nCS OSERDES
-/////////////////////////////////////////////////
-OSERDESE2 #(
-	.DATA_RATE_OQ("DDR"), // DDR, SDR
-	.DATA_RATE_TQ("DDR"), // DDR, BUF, SDR
-	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
-	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
-	.SERDES_MODE("MASTER")
-) oserdes_ncs_inst (
-	.OFB(), // 1-bit output: Feedback path for data
-	.OQ(w_oserdes_ncs_ser), // 1-bit output: Data path output
-	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
-	.SHIFTOUT1(),
-	.SHIFTOUT2(),
-	.TBYTEOUT(), // 1-bit output: Byte group tristate
-	.TFB(), // 1-bit output: 3-state control
-	.TQ(w_ncs_tristate), // 1-bit output: 3-state control
-	.CLK(i_clk_ddr), // 1-bit input: High speed clock
-	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
-	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1((DLL.lp_CWL % 2)),
-	.D2((DLL.lp_CWL % 2)),
-	.D3(!(DLL.lp_CWL % 2)),
-	.D4(!(DLL.lp_CWL % 2)),
-	.D5(),
-	.D6(),
-	.D7(),
-	.D8(),
-	.OCE(1'b1), // 1-bit input: Output data clock enable
-	.RST(r_phy_rst), // 1-bit input: Reset
-	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
-	.SHIFTIN1(1'b0),
-	.SHIFTIN2(1'b0),
-	// T1 - T4: 1-bit (each) input: Parallel 3-state inputs
-	.T1(1'b0),
-	.T2(1'b0),
-	.T3(1'b0),
-	.T4(1'b0),
-	.TBYTEIN(1'b0), // 1-bit input: Byte group tristate
-	.TCE(1'b1) // 1-bit input: 3-state clock enable
-);
-/////////////////////////////////////////////////
 // ADDR OSERDES
 /////////////////////////////////////////////////
 generate
@@ -332,7 +285,7 @@ OSERDESE2 #(
 	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
 	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
 	.SERDES_MODE("MASTER")
-) oserdes_ncs_inst (
+) oserdes_addr_inst (
 	.OFB(), // 1-bit output: Feedback path for data
 	.OQ(wn_oserdes_addr_ser[i]), // 1-bit output: Data path output
 	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
@@ -378,7 +331,7 @@ OSERDESE2 #(
 	.DATA_WIDTH(4), // Parallel data width (2-8,10,14)
 	.TRISTATE_WIDTH(4), // 3-state converter width (1,4)
 	.SERDES_MODE("MASTER")
-) oserdes_ncs_inst (
+) oserdes_ba_inst (
 	.OFB(), // 1-bit output: Feedback path for data
 	.OQ(wn_oserdes_bank_ser[i]), // 1-bit output: Data path output
 	// SHIFTOUT1 / SHIFTOUT2: 1-bit (each) output: Data output expansion (1-bit each)
@@ -1386,7 +1339,7 @@ assign on_dqs_idelay_cnt = wn_dqs_idelay_cnt;
 // Hardware out assigns
 assign o_ddr_nrst	= r_ddr_nrst;
 
-assign o_ddr_ncs	= w_oserdes_ncs_ser;
+assign o_ddr_ncs	= 1'b0;
 assign o_ddr_nras 	= w3_oserdes_cmd_ser[2];
 assign o_ddr_ncas 	= w3_oserdes_cmd_ser[1];
 assign o_ddr_nwe 	= w3_oserdes_cmd_ser[0];
