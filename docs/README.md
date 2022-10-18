@@ -1,4 +1,5 @@
 
+
 # ddr3-controller
 A DDR3(L) PHY and controller, written in Verilog, for Xilinx 7-Series FPGAs.
 
@@ -71,14 +72,25 @@ Wiring and control of the module is again made to be simple:
     * `o_phy_rddata_valid` --> `i_phy_rddata_valid`
     * `on_phy_rddata` --> `in_phy_rddata`
     * etc.
-* The `*delay_*` signals are to be connected from the rdcal module to the controller module:[^27]
+* The `*delay_*` signals are to be connected from the rdcal module to the controller module:[^26]
     * `o_dq_delay_ld` --> `in_dq_delay_ld`
     * `o5_dq_idelay_cnt` --> `in_dq_idelay_cnt`
     * etc.
 
 [^25]: By default, the read calibration word is `'h0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF`. The default address used for calibration is `27'b0`. These values can be changed by editing the `p_RDCAL_WORD` and `p_RDCAL_BANK`, `p_RDCAL_ROW`, and `p_RDCAL_COL` parameters, respectively.
 
-[^27]: If the signal widths do not match, concatenate the signal output from the read calibration module with itself. E.g. if `in_dqs_idelay_cnt` is defined as `[9:0]`, then connect it with `{o5_dqs_idelay_cnt, o5_dqs_idelay_cnt}`.
+[^26]: If the signal widths do not match, concatenate the signal output from the read calibration module with itself. E.g. if `in_dqs_idelay_cnt` is defined as `[9:0]`, then connect it with `{o5_dqs_idelay_cnt, o5_dqs_idelay_cnt}`.
+
+#### Calibrating read data output
+While the read calibration module will aim to center the DQS edges into the center of the DQ line data eye, it is up to the user of this interface to find the correct delay between a read command being issued to the memory chip, and the time the that the `o_phy_rddata_valid` flag signals that data is available on the `on_phy_rddata` parallel output. Once determined, this value will not change for a given application unless the values of CL or CWL change.
+
+To simplify:
+* A ±1 change of `p_RD_DELAY` will appear to shift[^27] the output data by 64 bits.
+* Toggling `p_ISERDES_32B_SHIFT` between `"TRUE"` and `"FALSE"` will shift the output data by 32 bits.
+
+[^27]: "Appear to shift": In actuality, this parameter determines the length of a shift register whose input equals 1'b1 whenever a READ command is given to the memory. The parameter does not in any way manipulate with the ISERDES parallel data output.
+
+For example, on an Arty S7-50 development board, at 300-333 MHz, correct read data can be obtained with the combination of `p_RD_DELAY = 10` and `p_ISERDES_32B_SHIFT = "FALSE"`.
 
 #### Example project
 An example project/top module for the Arty S7-50 board is currently available [in another repository](https://github.com/someone755/arty_s7_playground/blob/master/ddr3/ddr3.srcs/sources_1/ddr3_x16_cust_top.v).[^28] The Python script in that repository can also be used to test the functionality of the core.
@@ -139,7 +151,7 @@ The lack of proper timing constraints means that the Vivado timing analysis tool
 
 Routing all external signals (command, address, data bus) through OSERDES means that the IOLOGIC primitives are responsible for meeting timing. Relying on this solution has worked well in testing up to 464 MHz.
 
-[^50]: In my testing of the core between 100 and 464 MHz, operation was flawless, but of course I cannot make guarantees about functionality across PVT. The results of my testing should be taken as anecdotal, and thorough testing should be done explored.
+[^50]: In my testing of the core between 100 and 464 MHz, operation was flawless, but of course I cannot make guarantees about functionality across PVT. The results of my testing should be taken as anecdotal, and more thorough analysis should be undertaken.
 
 I haven't delved into setting up timing constraints for this project, nor do I plan to in the near future. If you are an XDC guru and wish to contribute to this controller, feel free to contact me, open a bug, or a pull request.
 
