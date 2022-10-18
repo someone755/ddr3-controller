@@ -11,17 +11,22 @@ module ddr3_x16_phy_cust #(
 	parameter	p_IDELAY_INIT_DQS	= 6,	// max 31; Should be '0' for IDELAY_TYPE = "VAR_LOAD"
 	parameter	p_IDELAY_INIT_DQ	= 10,
 	
-	parameter	p_RD_DELAY	= 6,	// delay in CK from RD CMD to valid ISERDES data
+	parameter	p_RD_DELAY	= 6,	// delay in divCK from RD CMD to valid ISERDES data
+									// May depend on the PCB trace lengths (?)
 									// DLL = "OFF"
 									//	CLK < 125 MHz:	"5"
 									// DLL = "ON":
 									//	300 MHz < CLK < 333 MHz:	"6"
 									// 	333 MHz < CLK < 400 MHz:	"6"
-									//	400 MHz < CLK < 466 MHz:	"6"
-	parameter	p_ISERDES_INV	= "FALSE",	// Some CL/CWL combinations require that ISERDES par out
-											//	be shifted by 1/2 divCK. Must be "TRUE" for 400-466 MHz.
+									//	400 MHz < CLK < 466 MHz:	"6" (w/ iserdes inversion)
+	parameter	p_ISERDES_32B_SHIFT	= "FALSE",	// Some CL/CWL combinations require that ISERDES par out
+												//	be shifted by 1/2 divCK (32 bits). In testing: "TRUE" for 400-466 MHz.
+												
+	//parameter	p_ISERDES_16B_SHIFT	= "FALSE",	// TODO: Figure out why these two were implemented in the first place.
+	//parameter	p_ISERDES_48B_SHIFT = "FALSE",	//	RDCAL will fail if data is shifted by 1/4 or 3/4!
+											
 
-	parameter	p_OUTPUT_PIPE	= "TRUE",	// Should be "TRUE" for DLL="ON" speeds, or timing fails.
+	parameter	p_OUTPUT_PIPE	= "FALSE",	// Sometimes (?) improves timing. Deprecated option.
 
 	parameter	p_BANK_W	= 3,	// bank width
 	parameter	p_ROW_W		= 14,	// row width
@@ -55,7 +60,7 @@ module ddr3_x16_phy_cust #(
 	parameter	p_MOD			= `max2(12*p_DDR_CK_PS, 15_000),	// MRS-to-non-MRS (MRS update delay)
 	parameter	p_ZQINIT		= `max2(512*p_DDR_CK_PS, 640_000)	// ZQ Calibration Long time from reset
 )(
-	output	[(4*p_DQ_W)-1:0]	on_oserdes_par_inv,
+	output	[(4*p_DQ_W)-1:0]	on_oserdes_shifted,
 	output	[(4*p_DQ_W)-1:0]	on_iserdes_par,
 	input	[1:0]	i2_iserdes_ce,
 	
@@ -178,14 +183,24 @@ reg	[0:3]	r4_tristate_dq = 'hF;
 
 // ISERDES/read data signals
 wire	[0:(4*p_DQ_W)-1]	wn_iserdes_par;	// data read from memory (from ISERDES)
-reg	[2*p_DQ_W-1:0]	rn_iserdes_par_inv_temp; // half length of wn_iserdes_par
-wire	[4*p_DQ_W-1:0]	wn_iserdes_par_inv = {rn_iserdes_par_inv_temp, wn_iserdes_par[0:2*p_DQ_W-1]}; // 1/2 divCK iserdes delayed/inverted signal
-wire	[4*p_DQ_W-1:0]	wn_iserdes_readout = (p_ISERDES_INV == "TRUE") ? wn_iserdes_par_inv : wn_iserdes_par; // mux between inverted and normal iserdes output
+reg	[2*p_DQ_W-1:0]	rn_iserdes_par_32shift_temp; // half length of wn_iserdes_par
+wire	[4*p_DQ_W-1:0]	wn_iserdes_par_32shift = {rn_iserdes_par_32shift_temp, wn_iserdes_par[0:2*p_DQ_W-1]}; // 1/2 divCK iserdes delayed/inverted signal
+//reg	[3*p_DQ_W-1:0]	rn_iserdes_par_16shift_temp;
+//wire	[4*p_DQ_W-1:0]	wn_iserdes_par_16shift = {rn_iserdes_par_16shift_temp, wn_iserdes_par[0:1*p_DQ_W-1]}; // 1/4 divCK iserdes delayed/inverted signal
+//reg	[1*p_DQ_W-1:0]	rn_iserdes_par_48shift_temp;
+//wire	[4*p_DQ_W-1:0]	wn_iserdes_par_48shift = {rn_iserdes_par_48shift_temp, wn_iserdes_par[0:3*p_DQ_W-1]}; // 3/4 divCK iserdes delayed/inverted signal
+
+
+wire	[4*p_DQ_W-1:0]	wn_iserdes_readout =	(p_ISERDES_32B_SHIFT == "TRUE") ? wn_iserdes_par_32shift :
+												//(p_ISERDES_16B_SHIFT == "TRUE") ? wn_iserdes_par_16shift :
+												//(p_ISERDES_48B_SHIFT == "TRUE") ? wn_iserdes_par_48shift :
+												wn_iserdes_par; // mux between inverted and normal iserdes output
+
 
 wire	[2:1]	w2_iserdes_ce;	// ISERDES primitive clock enable (2:1); either 'b00 or 'b01/10
 assign w2_iserdes_ce = i2_iserdes_ce;
 
-// IDELAY tap value counter output
+// IDELAY tap value counter output (truncate from DQ_W to max 1 per byte)
 wire	[(p_DQ_W/8)*5-1:0]	wn_dqs_idelay_cnt;
 wire	[4:0]	wn_dq_idelay_cnt_many	[p_DQ_W-1:0];
 wire	[(p_DQ_W/8)*5-1:0]	wn_dq_idelay_cnt_few;
@@ -770,8 +785,6 @@ end // init_mr_store: Store MR register values
 // read data valid signals
 reg	r_rd_op = 1'b0;	// high when r3_cmd == lp_CMD_RD
 reg	[p_RD_DELAY:0]	rn_rd_op_delayed = 'b0;	// r_rd_op pipe (delay)
-reg	[1:0]	r2_iserdes_valid = 'b0;	// counts 2*divCLK cycles per r_rd_op
-reg	r_rddata_valid = 1'b0;			// full BL8 read word valid 
 
 reg	[8*p_DQ_W-1:0]	rn_rddata = {(p_DQ_W*8){1'b0}};
 
@@ -820,7 +833,7 @@ wire	[(p_BANK_W-1):0]	wn_ddr_bank		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_bank_pip
 wire	[(p_ADDR_W-1):0]	wn_ddr_addr		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_addr_pipe		: rn_ddr_addr;
 
 reg	r_wr_op = 1'b0;
-reg	[1:0]	rn_wr_op_delayed = 6'b0;
+reg	[1:0]	rn_wr_op_delayed = 2'b0;
 reg	[(p_DQ_W*8)-1:0]	rn_write_data_delayed	[1:0];
 reg	[7:0]	r8_write_mask_delayed	[1:0];
 
@@ -875,10 +888,6 @@ always @(posedge i_clk_div) begin: curr_cmd
 	STATE_MRS: begin
 		if (rn_state_tmr == 0)
 			r3_cmd <= lp_CMD_MRS;
-	end
-	STATE_IDLE: begin
-		/*if (rn_state_tmr == 0)
-			r3_cmd <= lp_CMD_NOP;*/
 	end
 	STATE_REF: begin
 		if (rn_state_tmr == 0)
@@ -958,7 +967,7 @@ always @(posedge i_clk_div) begin: state_2ahead
 			else
 				rn_state_2ahead <= STATE_IDLE;
 			r_pre_req <= 1'b0;
-	end
+		end
 	end
 	STATE_ACT: begin
 		if (rn_state_tmr == 0) begin
@@ -1165,40 +1174,20 @@ always @(posedge i_clk_div) begin: rd_valid_ctrl
 	end
 	default: r_rd_op <= 1'b0;
 	endcase
+	
 	rn_rd_op_delayed <= {rn_rd_op_delayed[p_RD_DELAY-1:0], r_rd_op};
-	
-	case (r2_iserdes_valid)
-	'b01: begin
-		if (rn_rd_op_delayed[p_RD_DELAY])
-			r2_iserdes_valid <= 2'b10;
-	end
-	'b10: begin
-		r2_iserdes_valid <= 2'b11;
-	end
-	'b11: begin
-		if (rn_rd_op_delayed[p_RD_DELAY])
-			r2_iserdes_valid <= 2'b10;
-		else
-			r2_iserdes_valid <= 2'b01;
-	end
-	
-	default: r2_iserdes_valid <= 2'b01;
-	endcase
-	
-	if (r2_iserdes_valid[1])
-		if(!r2_iserdes_valid[0])
-			rn_rddata[8*p_DQ_W-1 : 4*p_DQ_W] <= wn_iserdes_readout;
-		else // if (r2_iserdes_valid[0])
-			rn_rddata[4*p_DQ_W-1:0] <= wn_iserdes_readout;
-			
-	if (r2_iserdes_valid == 2'b11)
-		r_rddata_valid <= 1'b1;
-	else
-		r_rddata_valid <= 1'b0;
+
+	rn_rddata <= {rn_rddata[4*p_DQ_W-1:0], wn_iserdes_readout};
 end
 // SHIFT ISERDES OUTPUT BY HALF CYCLE
-always @(posedge i_clk_div) begin: iserdes_invert
-	rn_iserdes_par_inv_temp <= wn_iserdes_par[2*p_DQ_W:4*p_DQ_W-1];
+always @(posedge i_clk_div) begin: iserdes_half_delay
+	rn_iserdes_par_32shift_temp <= wn_iserdes_par[2*p_DQ_W:4*p_DQ_W-1];
+end
+always @(posedge i_clk_div) begin: iserdes_3quarter_delay
+	rn_iserdes_par_48shift_temp <= wn_iserdes_par[3*p_DQ_W:4*p_DQ_W-1];
+end
+always @(posedge i_clk_div) begin: iserdes_1quarter_delay
+	rn_iserdes_par_16shift_temp <= wn_iserdes_par[1*p_DQ_W:4*p_DQ_W-1];
 end
 always @(posedge i_clk_div) begin: fifo_ctrl
 	if (rn_state_tmr == 0) begin
@@ -1322,10 +1311,10 @@ always @(posedge i_clk_div) begin: output_sig_pipe
 end
 
 
-assign o_phy_rddata_valid = r_rddata_valid;
+assign o_phy_rddata_valid = rn_rd_op_delayed[p_RD_DELAY-1];
 assign on_phy_rddata = rn_rddata;
 assign on_iserdes_par = wn_iserdes_par;
-assign on_oserdes_par_inv = wn_iserdes_par_inv;
+assign on_oserdes_shifted = wn_iserdes_readout;
 
 assign o_phy_init_done = r_init_done;
 
