@@ -11,33 +11,29 @@ module ddr3_x16_phy_cust #(
 	parameter	p_IDELAY_INIT_DQS	= 6,	// max 31; Should be '0' for IDELAY_TYPE = "VAR_LOAD"
 	parameter	p_IDELAY_INIT_DQ	= 10,
 	
-	parameter	p_RD_DELAY	= 6,	// delay in divCK from RD CMD to valid ISERDES data
-									// May depend on the PCB trace lengths (?)
-									// DLL = "OFF"
-									//	CLK < 125 MHz:	"5"
-									// DLL = "ON":
-									//	300 MHz < CLK < 333 MHz:	"6"
-									// 	333 MHz < CLK < 400 MHz:	"6"
-									//	400 MHz < CLK < 466 MHz:	"6" (w/ iserdes inversion)
-	parameter	p_ISERDES_32B_SHIFT	= "FALSE",	// Some CL/CWL combinations require that ISERDES par out
-												//	be shifted by 1/2 divCK (32 bits). In testing: "TRUE" for 400-466 MHz.
+	parameter	p_RD_DELAY	= 6,	// Delay in divCK from RD CMD to valid ISERDES data.
+									//	May depend on the PCB trace lengths (?)
+									//	The following values were tested working on Arty S7-50.
+									//	DLL = "OFF"
+									//		CLK < 125 MHz:	"7"
+									//	DLL = "ON":
+									//		300 MHz < CLK < 333 MHz:	"8"
+									// 		333 MHz < CLK < 400 MHz:	"8"
+									//		400 MHz < CLK < 466 MHz:	"?"
+	parameter	p_ISERDES_32B_SHIFT	= "FALSE",	// Some CL/CWL combinations require that ISERDES
+												//	par out	be shifted by 1/2 divCK (32 bits).
+												//	In testing: "TRUE" for 400-466 MHz.
 												
-	//parameter	p_ISERDES_16B_SHIFT	= "FALSE",	// TODO: Figure out why these two were implemented in the first place.
-	//parameter	p_ISERDES_48B_SHIFT = "FALSE",	//	RDCAL will fail if data is shifted by 1/4 or 3/4!
-											
-
-	parameter	p_OUTPUT_PIPE	= "FALSE",	// Sometimes (?) improves timing. Deprecated option.
-
 	parameter	p_BANK_W	= 3,	// bank width
 	parameter	p_ROW_W		= 14,	// row width
 	parameter	p_COL_W		= 10,	// column width; (11 -> TODO)
 	parameter	p_DQ_W		= 16,	// # of DQ pins
-	parameter	p_ADDR_W	= 14,	// # of ADDR pins; 14 or 15 (likely equal to ROW_W)
+	parameter	p_ADDR_W	= 14,	// # of ADDR pins; 14 or 15 (equal to ROW_W)
 
 	parameter	p_REFCLK_FREQUENCY	= 200.0,	// IDELAY resolution = 1000/(32 x 2 x REFCLK_FREQUENCY) [ns]
 												// For 200 MHz, tap delay is 0.078125 ns
 												// For 300 MHz, tap delay is 0.052083 ns
-												// Allowed is +- 10 MHz
+												// Actually allowed is +- 10 MHz
 	parameter	p_DDR_FREQ_MHZ	= 300,	// use ck2ps(p_DDR_FREQ_MHZ) to get period in ps
 										// JEDEC allows > 300 MHz with DLL ON, or < 125 MHZ with DLL OFF
 	parameter	p_DDR_CK_PS		= `ck2ps(p_DDR_FREQ_MHZ),
@@ -60,32 +56,35 @@ module ddr3_x16_phy_cust #(
 	parameter	p_MOD			= `max2(12*p_DDR_CK_PS, 15_000),	// MRS-to-non-MRS (MRS update delay)
 	parameter	p_ZQINIT		= `max2(512*p_DDR_CK_PS, 640_000)	// ZQ Calibration Long time from reset
 )(
-	output	[(4*p_DQ_W)-1:0]	on_oserdes_shifted,
+	output	[(4*p_DQ_W)-1:0]	on_oserdes_shifted, // debug signals
 	output	[(4*p_DQ_W)-1:0]	on_iserdes_par,
-	input	[1:0]	i2_iserdes_ce,
 	
-	input	i_clk_ddr,		// memory bus clock frequency
+	input	i_clk_ddr,		// memory bus clock
 	input	i_clk_ddr_90,	// same but delayed by 90 deg, used to generate output DQ from OSERDES
-	input	i_clk_div,		// half of bus clock frequency
+	input	i_clk_div,		// half frequency of bus clock
 	input	i_clk_ref,	// Used for IDELAYCTRL (controls taps for input DQS IDELAY), must be in range 190-210 MHz or
 						//	290-310 MHz, as per p_REFCLK_FREQUENCY
 	
-	input	i_phy_rst,	// active high reset for OSERDES, ISERDES, IDELAYCTRL, hold HIGH until all clocks are generated
+	input	i_mem_rst,	// active high reset for OSERDES, ISERDES, IDELAYCTRL, CTRL, DDR3 SDRAM; hold HIGH until all clocks are generated
 	
-	input	i_phy_cmd_en,	// Active high strobe for inputs: cmd_sel, addr bits, wrdata
-	input	i_phy_cmd_sel,	// Command for current request: 'b0 = WRITE || 'b1 = READ
-	output	o_phy_cmd_full,	// Active high indicates input command FIFO full
-
-	input	[p_BANK_W-1:0]	in_phy_bank,	// The user is free to reorder the address to best suit the application
-	input	[p_ROW_W-1:0]	in_phy_row,		//	The same operation committed to the same bank+row allows for improved access time
-	input	[p_COL_W-1:0]	in_phy_col,
-	input	[(8*p_DQ_W)-1:0]	in_phy_wrdata,	// eight words of write data for OSERDES (out of 8 for a total of BL8)
-	input	[7:0]	i8_phy_wrdm,	// write data mask input, 1 bit per word in burst
-	output	[(8*p_DQ_W)-1:0]	on_phy_rddata,	// eight words of read data from ISERDES (out of 8 for a total of BL8)
-	output	o_phy_rddata_valid, // output data valid flag
+	/** CMD FIFO connections **/
+		// CMD FIFO data input
+	input	i_mem_op,	// Operation/command for current request: 'b0 = WRITE || 'b1 = READ
+	input	[p_BANK_W-1:0]	in_mem_bank,	// The user is free to reorder the address to best suit the application
+	input	[p_ROW_W-1:0]	in_mem_row,		//	The same operation committed to the same bank+row allows for improved access time
+	input	[p_COL_W-1:0]	in_mem_col,
+	input	[(8*p_DQ_W)-1:0]	in_mem_wrd,	// 8 words of write data for OSERDES (out of 8 for a total of BL8)
+	input	[7:0]	i8_mem_wrdm,	// write data mask input, 1 bit per burst element
+		// CMD FIFO control flags
+	input	i_mem_wr,
+	output	o_mem_full,
 	
-	output	o_phy_init_done,
-	output	o_phy_idelay_rdy,
+	// Read data output
+	output	o_mem_rddata_valid,
+	output	[(8*p_DQ_W)-1:0]	on_mem_rddata,
+	
+	output	o_mem_init_done,
+	output	o_mem_idelay_rdy,
 	
 		// Tap control for x16 SDRAM, used in read calibration
 		//	For a 16-bit word of "0xAABB":
@@ -110,7 +109,7 @@ module ddr3_x16_phy_cust #(
 	output	[(p_DQ_W/8)*5-1:0]	on_dqs_idelay_cnt,	// IDELAY tap OUTPUT value
 	output	[(p_DQ_W/8)*5-1:0]	on_dq_idelay_cnt,
 		
-	// CONNECTION TO DRAM by PHY CORE
+	// CONNECTION TO DRAM by PHY
 	inout	[p_DQ_W-1:0]	ion_ddr_dq,
 	inout	[(p_DQ_W/8)-1:0]	ion_ddr_dqs_p,
 	inout	[(p_DQ_W/8)-1:0]	ion_ddr_dqs_n,
@@ -123,7 +122,6 @@ module ddr3_x16_phy_cust #(
 	output	o_ddr_ck_p,
 	output	o_ddr_ck_n,
 	
-	// CONNECTION TO DRAM by LOGIC CORE (ADDR, BANK, CS/RAS/CAS/WE, ODT, CKE, UDM/LDM)
 	output	[(p_DQ_W/8)-1:0]	on_ddr_dm,
 	output	[p_BANK_W-1:0]	on_ddr_bank,
 
@@ -139,8 +137,8 @@ module ddr3_x16_phy_cust #(
 /////////////////////////////////////////////////
 // PHY primitive connections
 /////////////////////////////////////////////////
-reg	r_init_done = 1'b0;
-reg	r_phy_rst = 1'b1;
+reg	r_mem_init_done = 1'b0;
+reg	r_mem_rst = 1'b1;
 
 // IOB -> IDELAY
 wire	[(p_DQ_W/8)-1:0]	wn_dqs_rd;
@@ -183,47 +181,37 @@ reg	[0:3]	r4_tristate_dq = 'hF;
 
 // ISERDES/read data signals
 wire	[0:(4*p_DQ_W)-1]	wn_iserdes_par;	// data read from memory (from ISERDES)
-reg	[2*p_DQ_W-1:0]	rn_iserdes_par_32shift_temp; // half length of wn_iserdes_par
-wire	[4*p_DQ_W-1:0]	wn_iserdes_par_32shift = {rn_iserdes_par_32shift_temp, wn_iserdes_par[0:2*p_DQ_W-1]}; // 1/2 divCK iserdes delayed/inverted signal
-//reg	[3*p_DQ_W-1:0]	rn_iserdes_par_16shift_temp;
-//wire	[4*p_DQ_W-1:0]	wn_iserdes_par_16shift = {rn_iserdes_par_16shift_temp, wn_iserdes_par[0:1*p_DQ_W-1]}; // 1/4 divCK iserdes delayed/inverted signal
-//reg	[1*p_DQ_W-1:0]	rn_iserdes_par_48shift_temp;
-//wire	[4*p_DQ_W-1:0]	wn_iserdes_par_48shift = {rn_iserdes_par_48shift_temp, wn_iserdes_par[0:3*p_DQ_W-1]}; // 3/4 divCK iserdes delayed/inverted signal
-
+reg	[2*p_DQ_W-1:0]	rn_iserdes_par_32shift_temp;	// half length of wn_iserdes_par
+wire	[4*p_DQ_W-1:0]	wn_iserdes_par_32shift = {rn_iserdes_par_32shift_temp, wn_iserdes_par[0:2*p_DQ_W-1]};	// 1/2 divCK iserdes delayed/inverted signal
 
 wire	[4*p_DQ_W-1:0]	wn_iserdes_readout =	(p_ISERDES_32B_SHIFT == "TRUE") ? wn_iserdes_par_32shift :
-												//(p_ISERDES_16B_SHIFT == "TRUE") ? wn_iserdes_par_16shift :
-												//(p_ISERDES_48B_SHIFT == "TRUE") ? wn_iserdes_par_48shift :
-												wn_iserdes_par; // mux between inverted and normal iserdes output
-
-
-wire	[2:1]	w2_iserdes_ce;	// ISERDES primitive clock enable (2:1); either 'b00 or 'b01/10
-assign w2_iserdes_ce = i2_iserdes_ce;
+												wn_iserdes_par; // mux between shifted and direct iserdes output
 
 // IDELAY tap value counter output (truncate from DQ_W to max 1 per byte)
+// This assumes that read calibration is at most per-byte (not per-bit)
 wire	[(p_DQ_W/8)*5-1:0]	wn_dqs_idelay_cnt;
-wire	[4:0]	wn_dq_idelay_cnt_many	[p_DQ_W-1:0];
+wire	[4:0]	wn_dq_idelay_cnt_many	[0:p_DQ_W-1];
 wire	[(p_DQ_W/8)*5-1:0]	wn_dq_idelay_cnt_few;
 if (p_DQ_W > 8)
-	assign wn_dq_idelay_cnt_few = {wn_dq_idelay_cnt_many[8], wn_dq_idelay_cnt_many[0]};
+	assign wn_dq_idelay_cnt_few = {wn_dq_idelay_cnt_many[0], wn_dq_idelay_cnt_many[8]};
 else
 	assign wn_dq_idelay_cnt_few = wn_dq_idelay_cnt_many[0];
 
 // W/R command FIFO
-wire	[lp_CMDFIFO_WIDTH-1:0]	wn_cmdfifo_din;
-assign wn_cmdfifo_din = {i_phy_cmd_sel, in_phy_bank, in_phy_row, in_phy_col, in_phy_wrdata, i8_phy_wrdm};
-wire	[lp_CMDFIFO_WIDTH-1:0]	wn_cmdfifo_dout;
-wire	w_cmdfifo_full;
-wire	w_cmdfifo_empty;
-reg	r_cmdfifo_rd	= 1'b0;
+wire	[lp_CMDFIFO_WIDTH-1:0]	wn_mem_din;
+assign wn_mem_din = {i_mem_op, in_mem_bank, in_mem_row, in_mem_col, in_mem_wrd, i8_mem_wrdm};
+wire	[lp_CMDFIFO_WIDTH-1:0]	wn_mem_dout;
+wire	w_mem_full;
+wire	w_mem_empty;
+reg	r_mem_rd	= 1'b0;
 
-wire	w_cmdfifo_op;
-wire	[p_BANK_W-1:0]	wn_cmdfifo_bank;
-wire	[p_ROW_W-1:0]	wn_cmdfifo_row;
-wire	[p_COL_W-1:0]	wn_cmdfifo_col;
-wire	[(8*p_DQ_W)-1:0]	wn_cmdfifo_wrd;
-wire	[7:0]	wn_cmdfifo_wrm;
-assign	{w_cmdfifo_op, wn_cmdfifo_bank, wn_cmdfifo_row, wn_cmdfifo_col, wn_cmdfifo_wrd, wn_cmdfifo_wrm}	= wn_cmdfifo_dout;
+wire	w_mem_op;
+wire	[p_BANK_W-1:0]	wn_mem_bank;
+wire	[p_ROW_W-1:0]	wn_mem_row;
+wire	[p_COL_W-1:0]	wn_mem_col;
+wire	[(8*p_DQ_W)-1:0]	wn_mem_wrd;
+wire	[7:0]	wn_mem_wrdm;
+assign	{w_mem_op, wn_mem_bank, wn_mem_row, wn_mem_col, wn_mem_wrd, wn_mem_wrdm}	= wn_mem_dout;
 
 //###############################################
 //## PRIMITIVE DECLARATIONS:
@@ -266,16 +254,16 @@ OSERDESE2 #(
 	.CLK(i_clk_ddr), // 1-bit input: High speed clock
 	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
 	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1(!(DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
-	.D2(!(DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
-	.D3( (DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
-	.D4( (DLL.lp_CWL % 2) ? w3_cmd[i] : 1'b1),
+	.D1(!(DLL.lp_CWL % 2) ? r3_cmd[i] : 1'b1),
+	.D2(!(DLL.lp_CWL % 2) ? r3_cmd[i] : 1'b1),
+	.D3( (DLL.lp_CWL % 2) ? r3_cmd[i] : 1'b1),
+	.D4( (DLL.lp_CWL % 2) ? r3_cmd[i] : 1'b1),
 	.D5(),
 	.D6(),
 	.D7(),
 	.D8(),
 	.OCE(1'b1), // 1-bit input: Output data clock enable
-	.RST(r_phy_rst), // 1-bit input: Reset
+	.RST(r_mem_rst), // 1-bit input: Reset
 	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 	.SHIFTIN1(1'b0),
 	.SHIFTIN2(1'b0),
@@ -312,16 +300,16 @@ OSERDESE2 #(
 	.CLK(i_clk_ddr), // 1-bit input: High speed clock
 	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
 	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1(wn_ddr_addr[i]),
-	.D2(wn_ddr_addr[i]),
-	.D3(wn_ddr_addr[i]),
-	.D4(wn_ddr_addr[i]),
+	.D1(rn_ddr_addr[i]),
+	.D2(rn_ddr_addr[i]),
+	.D3(rn_ddr_addr[i]),
+	.D4(rn_ddr_addr[i]),
 	.D5(),
 	.D6(),
 	.D7(),
 	.D8(),
 	.OCE(1'b1), // 1-bit input: Output data clock enable
-	.RST(r_phy_rst), // 1-bit input: Reset
+	.RST(r_mem_rst), // 1-bit input: Reset
 	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 	.SHIFTIN1(1'b0),
 	.SHIFTIN2(1'b0),
@@ -358,16 +346,16 @@ OSERDESE2 #(
 	.CLK(i_clk_ddr), // 1-bit input: High speed clock
 	.CLKDIV(i_clk_div), // 1-bit input: Divided clock
 	// D1 - D8: 1-bit (each) input: Parallel data inputs (1-bit each)
-	.D1(wn_ddr_bank[i]),
-	.D2(wn_ddr_bank[i]),
-	.D3(wn_ddr_bank[i]),
-	.D4(wn_ddr_bank[i]),
+	.D1(rn_ddr_bank[i]),
+	.D2(rn_ddr_bank[i]),
+	.D3(rn_ddr_bank[i]),
+	.D4(rn_ddr_bank[i]),
 	.D5(),
 	.D6(),
 	.D7(),
 	.D8(),
 	.OCE(1'b1), // 1-bit input: Output data clock enable
-	.RST(r_phy_rst), // 1-bit input: Reset
+	.RST(r_mem_rst), // 1-bit input: Reset
 	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 	.SHIFTIN1(1'b0),
 	.SHIFTIN2(1'b0),
@@ -421,7 +409,7 @@ OSERDESE2 #(
 	.D7(),
 	.D8(),
 	.OCE(1'b1), // 1-bit input: Output data clock enable
-	.RST(r_phy_rst), // 1-bit input: Reset
+	.RST(r_mem_rst), // 1-bit input: Reset
 	// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 	.SHIFTIN1(1'b0),
 	.SHIFTIN2(1'b0),
@@ -439,7 +427,7 @@ OSERDESE2 #(
 IDELAYCTRL IDELAYCTRL_inst (
 	.RDY(w_idelay_rdy), // 1-bit output: Ready output
 	.REFCLK(i_clk_ref), // 1-bit input: Reference clock input
-	.RST(r_phy_rst) // 1-bit input: Active high reset input
+	.RST(r_mem_rst) // 1-bit input: Active high reset input
 );
 /////////////////////////////////////////////////
 // DQS DIFFERENTIAL IO BUFFER
@@ -528,7 +516,7 @@ for (i = 0; i < (p_DQ_W/8); i = i+1) begin
 		.D7(),
 		.D8(),
 		.OCE(1'b1), // 1-bit input: Output data clock enable
-		.RST(r_phy_rst), // 1-bit input: Reset
+		.RST(r_mem_rst), // 1-bit input: Reset
 		// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 		.SHIFTIN1(1'b0),
 		.SHIFTIN2(1'b0),
@@ -617,8 +605,8 @@ for (i = 0; i < p_DQ_W; i = i+1) begin
 		// position every time Bitslip is invoked (DDR operation is different from
 		// SDR).
 		// CE1, CE2: 1-bit (each) input: Data register clock enable inputs
-		.CE1(w2_iserdes_ce[1]),
-		.CE2(w2_iserdes_ce[2]),
+		.CE1(1'b1),
+		.CE2(1'b1),
 		.CLKDIVP(1'b0), // 1-bit input: TBD
 		// Clocks: 1-bit (each) input: ISERDESE2 clock input ports
 		.CLK(wn_dqs_rd_delayed_bufio[i/8]), // 1-bit input: High-speed clock
@@ -633,7 +621,7 @@ for (i = 0; i < p_DQ_W; i = i+1) begin
 		.DDLY(wn_dq_rd_delayed[i]), // 1-bit input: Serial data from IDELAYE2
 		.OFB(1'b0), // 1-bit input: Data feedback from OSERDESE2
 		.OCLKB(~i_clk_ddr_90), // 1-bit input: High speed negative edge output clock
-		.RST(r_phy_rst), // 1-bit input: Active high asynchronous reset
+		.RST(r_mem_rst), // 1-bit input: Active high asynchronous reset
 		// SHIFTIN1, SHIFTIN2: 1-bit (each) input: Data width expansion input ports
 		.SHIFTIN1(1'b0),
 		.SHIFTIN2(1'b0)
@@ -673,7 +661,7 @@ for (i = 0; i < p_DQ_W; i = i+1) begin
 		.D7(),
 		.D8(),
 		.OCE(1'b1), // 1-bit input: Output data clock enable
-		.RST(r_phy_rst), // 1-bit input: Reset
+		.RST(r_mem_rst), // 1-bit input: Reset
 		// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 		.SHIFTIN1(1'b0),
 		.SHIFTIN2(1'b0),
@@ -720,7 +708,7 @@ for (i = 0; i < p_DQ_W/8; i = i+1) begin
 		.D7(),
 		.D8(),
 		.OCE(1'b1), // 1-bit input: Output data clock enable
-		.RST(r_phy_rst), // 1-bit input: Reset
+		.RST(r_mem_rst), // 1-bit input: Reset
 		// SHIFTIN1 / SHIFTIN2: 1-bit (each) input: Data input expansion (1-bit each)
 		.SHIFTIN1(1'b0),
 		.SHIFTIN2(1'b0),
@@ -740,13 +728,13 @@ endgenerate
 /////////////////////////////////////////////////
 fifo_generator_0 cmdfifo_inst (
     .clk(i_clk_div),	// : IN STD_LOGIC;
-    .srst(r_phy_rst),	// : IN STD_LOGIC;
-    .din(wn_cmdfifo_din),	// : IN STD_LOGIC_VECTOR(lp_CMDFIFO_WIDTH-1 DOWNTO 0);
-    .wr_en(i_phy_cmd_en),	// : IN STD_LOGIC;
-    .rd_en(r_cmdfifo_rd),	// : IN STD_LOGIC;
-    .dout(wn_cmdfifo_dout),	// : OUT STD_LOGIC_VECTOR(lp_CMDFIFO_WIDTH-1 DOWNTO 0);
-    .full(w_cmdfifo_full),	// : OUT STD_LOGIC;
-    .empty(w_cmdfifo_empty)// : OUT STD_LOGIC
+    .srst(r_mem_rst),	// : IN STD_LOGIC;
+    .din(wn_mem_din),	// : IN STD_LOGIC_VECTOR(lp_CMDFIFO_WIDTH-1 DOWNTO 0);
+    .wr_en(i_mem_wr),	// : IN STD_LOGIC;
+    .rd_en(r_mem_rd),	// : IN STD_LOGIC;
+    .dout(wn_mem_dout),	// : OUT STD_LOGIC_VECTOR(lp_CMDFIFO_WIDTH-1 DOWNTO 0);
+    .full(w_mem_full),	// : OUT STD_LOGIC;
+    .empty(w_mem_empty)// : OUT STD_LOGIC
 );
 
 //###############################################
@@ -761,6 +749,7 @@ reg	[3:0]	rn_state_3ahead;	// combinational logic assigned to above
 // refresh timer
 localparam lp_REF_TMR_WIDTH = $clog2(lpdiv_RFC_MAX);
 reg	[lp_REF_TMR_WIDTH-1:0]	rn_ref_tmr	= lpdiv_RFC_MAX - 1'b1;	// refresh timer
+
 // REF/ACT/PRE request flags
 reg	r_ref_req	= 1'b0;
 reg	r_act_req	= 1'b0;
@@ -797,45 +786,29 @@ reg	[7:0]				r8_wrm_pipe	[0:2];
 
 // oserdes state machine control
 reg	[2:0]	r3_dqs_state = 3'd0;
-reg	r_oserdes_trig = 1'b0;	// state machine trigger
-reg	r_oserdes_trig_pipe = 1'b0;
 reg	[(p_DQ_W*8)-1:0]	rn_write_data = {(p_DQ_W*8){1'b0}};
-reg	[(p_DQ_W*8)-1:0]	rn_write_data_pipe = {(p_DQ_W*8){1'b0}};
 reg	[(p_DQ_W*8)-1:0]	rn_wrdata_buf = {(p_DQ_W*8){1'b0}};
 reg	[7:0]	r8_write_mask = 'h0;
-reg	[7:0]	r8_write_mask_pipe = 4'h0;
 reg	[7:0]	r8_wrmask_buf = 4'h0;
 
 // direct output
 reg	r_ddr_nrst = 1'b0;
-reg	r_ddr_nrst_pipe = 1'b0;
 reg	r_ddr_cke = 1'b0;
-reg	r_ddr_cke_pipe = 1'b0;
 
 reg	[(p_BANK_W-1):0]	rn_ddr_bank		= {p_BANK_W{1'b0}};
-reg	[(p_BANK_W-1):0]	rn_ddr_bank_pipe	= {p_BANK_W{1'b0}};
 reg	[(p_ADDR_W-1):0]	rn_ddr_addr	= {p_ADDR_W{1'b0}};
-reg	[(p_ADDR_W-1):0]	rn_ddr_addr_pipe	= {p_ADDR_W{1'b0}};
 
 reg	[2:0]	r3_cmd	= lp_CMD_NOP;	// command bus {nRAS, nCAS, nWE}
-reg	[2:0]	r3_cmd_pipe	= lp_CMD_NOP;
-
-// output multiplexers: make output 1 divCK delayed or no (improves timing)
-wire	w_oserdes_trig						= (p_OUTPUT_PIPE == "TRUE") ? rn_wr_op_delayed[1]	: rn_wr_op_delayed[0];
-wire	[(p_DQ_W*8)-1:0]	wn_write_data	= (p_OUTPUT_PIPE == "TRUE") ? rn_write_data_delayed[1]	: rn_write_data_delayed[0];
-wire	[7:0]	w8_write_mask				= (p_OUTPUT_PIPE == "TRUE") ? r8_write_mask_delayed[1]	: r8_write_mask_delayed[0];
-
-wire	w_ddr_cke							= (p_OUTPUT_PIPE == "TRUE") ? r_ddr_cke_pipe		: r_ddr_cke;
-
-wire	[2:0]	w3_cmd						= (p_OUTPUT_PIPE == "TRUE") ? r3_cmd_pipe			: r3_cmd;
-
-wire	[(p_BANK_W-1):0]	wn_ddr_bank		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_bank_pipe		: rn_ddr_bank;
-wire	[(p_ADDR_W-1):0]	wn_ddr_addr		= (p_OUTPUT_PIPE == "TRUE") ? rn_ddr_addr_pipe		: rn_ddr_addr;
 
 reg	r_wr_op = 1'b0;
-reg	[1:0]	rn_wr_op_delayed = 2'b0;
-reg	[(p_DQ_W*8)-1:0]	rn_write_data_delayed	[1:0];
-reg	[7:0]	r8_write_mask_delayed	[1:0];
+reg	rn_wr_op_delayed = 1'b0;
+reg	[(p_DQ_W*8)-1:0]	rn_write_data_delayed;
+reg	[7:0]	r8_write_mask_delayed;
+
+// OSERDES machine requires one additional clock cycle of delay
+wire	w_oserdes_trig						= rn_wr_op_delayed;
+wire	[(p_DQ_W*8)-1:0]	wn_write_data	= rn_write_data_delayed;
+wire	[7:0]	w8_write_mask				= r8_write_mask_delayed;
 
 // OSERDES TRIGGER FLAG & OSERDES DATA
 always @(posedge i_clk_div) begin: oserdes_input
@@ -854,15 +827,13 @@ always @(posedge i_clk_div) begin: oserdes_input
 	end
 	default: r_wr_op <= 1'b0;
 	endcase
-	rn_wr_op_delayed <= {rn_wr_op_delayed[0], r_wr_op};
-	rn_write_data_delayed[1] <= rn_write_data_delayed[0];
-	rn_write_data_delayed[0] <= rn_write_data;
-	r8_write_mask_delayed[1] <= r8_write_mask_delayed[0];
-	r8_write_mask_delayed[0] <= r8_write_mask;
+	rn_wr_op_delayed <= r_wr_op;
+	rn_write_data_delayed <= rn_write_data;
+	r8_write_mask_delayed <= r8_write_mask;
 end
 // CKE PIN
 always @(posedge i_clk_div) begin: cke_ctrl
-	if (i_phy_rst)
+	if (i_mem_rst)
 		r_ddr_cke <= 1'b0;
 		
 	case (rn_state_curr)
@@ -875,8 +846,8 @@ always @(posedge i_clk_div) begin: cke_ctrl
 end
 // RST PIN
 always @(posedge i_clk_div) begin: rst_ctrl
-	r_ddr_nrst <= ~i_phy_rst;	// output pin to SDRAM
-	r_phy_rst <= i_phy_rst;	// primitive reset
+	r_ddr_nrst <= ~i_mem_rst;	// output pin to SDRAM
+	r_mem_rst <= i_mem_rst;	// primitive reset
 end
 // CURRENT CMD
 always @(posedge i_clk_div) begin: curr_cmd
@@ -922,22 +893,22 @@ always @(posedge i_clk_div) begin: curr_cmd
 end
 // CONTROL OF INIT CMD SEQUENCE: CKE HIGH -> MR2 -> MR3 -> MR1 -> MR0 -> ZQINIT -> IDLE
 always @(posedge i_clk_div) begin: init_cmd_ctr
-	if (i_phy_rst)
+	if (i_mem_rst)
 		r3_init_cmd_ctr <= 2'b0;
-	else if (!r_init_done)
+	else if (!r_mem_init_done)
 		if (rn_state_tmr == 'd0)
 			r3_init_cmd_ctr <= r3_init_cmd_ctr + 1;
 end
 always @(posedge i_clk_div) begin: init_flag_ctrl
-	if (i_phy_rst)
-		r_init_done <= 1'b0;
+	if (i_mem_rst)
+		r_mem_init_done <= 1'b0;
 	else if (rn_state_curr == STATE_IDLE)
-		r_init_done <= 1'b1;
+		r_mem_init_done <= 1'b1;
 end
 // UPCOMING STATE
 always @(posedge i_clk_div) begin: state_2ahead
-	r_cmdfifo_rd <= 1'b0;
-	if (i_phy_rst)
+	r_mem_rd <= 1'b0;
+	if (i_mem_rst)
 		rn_state_2ahead <= STATE_MRS;
 		
 	case (rn_state_2ahead)
@@ -971,12 +942,12 @@ always @(posedge i_clk_div) begin: state_2ahead
 	end
 	STATE_ACT: begin
 		if (rn_state_tmr == 0) begin
-			if (w_cmdfifo_op == lp_CMDFIFO_OP_RD)
+			if (w_mem_op == lp_CMDFIFO_OP_RD)
 				rn_state_2ahead <= STATE_RD;
-			else //if (w_cmdfifo_op == lp_CMDFIFO_OP_WR)
+			else //if (w_mem_op == lp_CMDFIFO_OP_WR)
 				rn_state_2ahead <= STATE_WR;
-			if (!w_cmdfifo_empty)
-				r_cmdfifo_rd <= 1'b1;
+			if (!w_mem_empty)
+				r_mem_rd <= 1'b1;
 			else
 				r_pre_req <= 1'b1;
 			r_act_req <= 1'b0;
@@ -994,35 +965,35 @@ always @(posedge i_clk_div) begin: state_2ahead
 	//	exceeded. The write/read operation is interrupted if the refresh request flag is raised.
 	STATE_WR: begin
 		if (rn_state_tmr == 0) begin
-			if (r_ref_req || r_pre_req || {rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} != {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_WR}) begin
+			if (r_ref_req || r_pre_req || {rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} != {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_WR}) begin
 				rn_state_2ahead <= STATE_PRE;
-				if ({rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} != {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_WR})
+				if ({rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} != {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_WR})
 					r_act_req <= 1'b1;
 				if (r_ref_req && !r_pre_req)
 					r_act_req <= 1'b1;
-			end else begin /*if ({rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} == {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_WR}) begin*/
+			end else begin /*if ({rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} == {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_WR}) begin*/
 				rn_state_2ahead <= STATE_WR;
-				if (w_cmdfifo_empty)
+				if (w_mem_empty)
 					r_pre_req <= 1'b1;
 				else
-					r_cmdfifo_rd <= 1'b1;
+					r_mem_rd <= 1'b1;
 			end
 		end
 	end
 	STATE_RD: begin
 		if (rn_state_tmr == 0) begin
-			if (r_ref_req || r_pre_req || {rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} != {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_RD}) begin
+			if (r_ref_req || r_pre_req || {rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} != {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_RD}) begin
 				rn_state_2ahead <= STATE_PRE;
-				if ({rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} != {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_RD})
+				if ({rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} != {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_RD})
 					r_act_req <= 1'b1;
 				if (r_ref_req && !r_pre_req)
 					r_act_req <= 1'b1;
-			end else begin /*if ({rn_bank_pipe[2], rn_row_pipe[2], w_cmdfifo_op} == {wn_cmdfifo_bank, wn_cmdfifo_row, lp_CMDFIFO_OP_WR}) begin*/
+			end else begin /*if ({rn_bank_pipe[2], rn_row_pipe[2], w_mem_op} == {wn_mem_bank, wn_mem_row, lp_CMDFIFO_OP_WR}) begin*/
 				rn_state_2ahead <= STATE_RD;
-				if (w_cmdfifo_empty)
+				if (w_mem_empty)
 					r_pre_req <= 1'b1;
 				else
-					r_cmdfifo_rd <= 1'b1;
+					r_mem_rd <= 1'b1;
 			end
 		end
 	end
@@ -1033,10 +1004,10 @@ always @(posedge i_clk_div) begin: state_2ahead
 				//	precharged. Otherwise could check for r8_bank_active. But if banks
 				//	are already precharged, PRECHARGE cmd is interpreted as NOP.
 				rn_state_2ahead <= STATE_REF;
-			else if (!w_cmdfifo_empty || r_act_req) begin
+			else if (!w_mem_empty || r_act_req) begin
 				rn_state_2ahead <= STATE_ACT;
 				if (!r_act_req)
-					r_cmdfifo_rd <= 1'b1;
+					r_mem_rd <= 1'b1;
 			end else
 				rn_state_2ahead <= STATE_IDLE;
 	end
@@ -1049,9 +1020,9 @@ always @(posedge i_clk_div) begin: state_2ahead
 end
 // REFRESH TIMER
 always @(posedge i_clk_div) begin: refresh_timer
-	if (i_phy_rst)
+	if (i_mem_rst)
 		 rn_ref_tmr <= lpdiv_REFI;
-	else if (r_init_done)
+	else if (r_mem_init_done)
 		if (rn_ref_tmr > 0)
 			rn_ref_tmr <= rn_ref_tmr - 1'b1;
 		else // if (rn_ref_tmr == 0)
@@ -1059,7 +1030,7 @@ always @(posedge i_clk_div) begin: refresh_timer
 end
 // REFRESH FLAG
 always @(posedge i_clk_div) begin: refresh_flag
-	if (i_phy_rst)
+	if (i_mem_rst)
 		r_ref_req <= 1'b0;
 	else if (rn_ref_tmr == 'd0)
 		r_ref_req <= 1'b1;
@@ -1068,7 +1039,7 @@ always @(posedge i_clk_div) begin: refresh_flag
 end
 // STATE VAR PIPE
 always @(posedge i_clk_div) begin: state_curr
-	if (i_phy_rst) begin
+	if (i_mem_rst) begin
 		rn_state_curr <= STATE_INIT;
 		rn_state_1ahead <= STATE_MRS;
 	end else if (rn_state_tmr == 0) begin
@@ -1078,7 +1049,7 @@ always @(posedge i_clk_div) begin: state_curr
 end
 // CURRENT STATE TIMER
 always @(posedge i_clk_div) begin: state_curr_timer
-	if (i_phy_rst) begin
+	if (i_mem_rst) begin
 		rn_state_tmr <= lpdiv_CKE_LO;
 		rn_state_tmr_next <= lpdiv_XPR;
 	end else if (rn_state_tmr == 0) begin
@@ -1183,20 +1154,14 @@ end
 always @(posedge i_clk_div) begin: iserdes_half_delay
 	rn_iserdes_par_32shift_temp <= wn_iserdes_par[2*p_DQ_W:4*p_DQ_W-1];
 end
-always @(posedge i_clk_div) begin: iserdes_3quarter_delay
-	rn_iserdes_par_48shift_temp <= wn_iserdes_par[3*p_DQ_W:4*p_DQ_W-1];
-end
-always @(posedge i_clk_div) begin: iserdes_1quarter_delay
-	rn_iserdes_par_16shift_temp <= wn_iserdes_par[1*p_DQ_W:4*p_DQ_W-1];
-end
 always @(posedge i_clk_div) begin: fifo_ctrl
 	if (rn_state_tmr == 0) begin
 		// pipe[2] as buffer between fifo and pipe[1]
-		rn_bank_pipe[2] <= wn_cmdfifo_bank;
-		rn_row_pipe[2] <= wn_cmdfifo_row;
-		rn_col_pipe[2] <= wn_cmdfifo_col;
-		rn_wrd_pipe[2] <= wn_cmdfifo_wrd;
-		r8_wrm_pipe[2] <= wn_cmdfifo_wrm;
+		rn_bank_pipe[2] <= wn_mem_bank;
+		rn_row_pipe[2] <= wn_mem_row;
+		rn_col_pipe[2] <= wn_mem_col;
+		rn_wrd_pipe[2] <= wn_mem_wrd;
+		r8_wrm_pipe[2] <= wn_mem_wrdm;
 			
 		// pipe[1] for ACT
 		rn_bank_pipe[1] <= rn_bank_pipe[2];
@@ -1297,30 +1262,19 @@ always @(posedge i_clk_div) begin: oserdes_ctrl
 	default: ;
 	endcase
 end
-always @(posedge i_clk_div) begin: output_sig_pipe
-	r_oserdes_trig_pipe <= r_oserdes_trig;
-	rn_write_data_pipe <= rn_write_data;
-	r8_write_mask_pipe <= r8_write_mask;
-	
-	r_ddr_cke_pipe <= r_ddr_cke;
-	
-	r3_cmd_pipe <= r3_cmd;
-	
-	rn_ddr_bank_pipe <= rn_ddr_bank;
-	rn_ddr_addr_pipe <= rn_ddr_addr;
-end
 
-
-assign o_phy_rddata_valid = rn_rd_op_delayed[p_RD_DELAY-1];
-assign on_phy_rddata = rn_rddata;
+// Final output assignments
 assign on_iserdes_par = wn_iserdes_par;
 assign on_oserdes_shifted = wn_iserdes_readout;
 
-assign o_phy_init_done = r_init_done;
+assign o_mem_rddata_valid = rn_rd_op_delayed[p_RD_DELAY];
+assign on_mem_rddata = rn_rddata;
 
-assign o_phy_idelay_rdy = w_idelay_rdy;
+assign	o_mem_full = w_mem_full;
 
-assign o_phy_cmd_full = w_cmdfifo_full;
+assign o_mem_init_done = r_mem_init_done;
+
+assign o_mem_idelay_rdy = w_idelay_rdy;
 
 assign on_dq_idelay_cnt = wn_dq_idelay_cnt_few;
 assign on_dqs_idelay_cnt = wn_dqs_idelay_cnt;
@@ -1335,7 +1289,7 @@ assign o_ddr_nwe 	= w3_oserdes_cmd_ser[0];
 
 assign on_ddr_dm	= wn_dm_wr;
 
-assign o_ddr_cke	= w_ddr_cke;
+assign o_ddr_cke	= r_ddr_cke;
 
 assign o_ddr_odt	= 1'b0;
 
